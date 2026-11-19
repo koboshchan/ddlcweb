@@ -1,0 +1,844 @@
+import type {
+  CharacterDef,
+  DefaultDef,
+  ImageDef,
+  PoemDef,
+  PyExprNode,
+  ScriptFile,
+  ScriptIndex,
+  ScriptStatement,
+} from "../types/game-data";
+import type { AudioChannelName, AudioEngine } from "./AudioEngine";
+import type { Persistence, SaveSlot } from "./Persistence";
+import { JumpSignal, PyRuntime, RestartSignal } from "./PyRuntime";
+import type { SceneManager } from "./SceneManager";
+import type { Stage } from "./Stage";
+import type { VirtualFS } from "./VirtualFS";
+import type { DialogueOverlay } from "../ui/DialogueOverlay";
+import type { ModalScreens } from "../ui/ModalScreens";
+import type { PoemGameScreen } from "../ui/PoemGameScreen";
+import type { PoemViewScreen } from "../ui/PoemViewScreen";
+
+interface Frame {
+  labelName: string;
+  statements: ScriptStatement[];
+  index: number;
+  hasScope: boolean;
+}
+
+export interface ScriptVMDeps {
+  stage: Stage;
+  scriptIndex: ScriptIndex;
+  loadScript: (stem: string) => Promise<ScriptFile>;
+  characters: Record<string, CharacterDef>;
+  defaults: DefaultDef[];
+  poems: Record<string, PoemDef>;
+  scene: SceneManager;
+  audio: AudioEngine;
+  dialogue: DialogueOverlay;
+  modals: ModalScreens;
+  poemView: PoemViewScreen;
+  persistence: Persistence;
+  vfs: VirtualFS;
+  onReturnToTitle: () => void;
+  onRestartAtLabel: (label?: string) => void;
+}
+
+/**
+ * Full Ren'Py AST virtual machine executing DDLC's compiled scripts,
+ * Python AST blocks, parameterized labels, screens, poems, poem minigame,
+ * Monika console, credits, and save/load state.
+ */
+export class ScriptVM {
+  private readonly scriptCache = new Map<string, ScriptFile>();
+  public readonly py: PyRuntime;
+  private poemGame: PoemGameScreen | null = null;
+  private callStack: Frame[] = [];
+  private currentLabel = "start";
+  private running = false;
+  private abortToken = 0;
+
+  public constructor(private readonly deps: ScriptVMDeps) {
+    this.py = new PyRuntime(
+      deps.defaults,
+      deps.poems,
+      deps.persistence,
+      deps.vfs,
+      deps.audio,
+      deps.scene,
+      {
+        pause: (sec) => this.handlePause(sec),
+        callScreen: (name, args, kwargs) => this.handleScreenAction("call", name, args, kwargs),
+        showScreen: (name, args, kwargs) => {
+          void this.handleScreenAction("show", name, args, kwargs);
+        },
+        hideScreen: (name) => {
+          void this.handleScreenAction("hide", name, [], {});
+        },
+        displayMenu: (items) => this.handlePythonMenu(items),
+        setDialogueStyle: (styleName) => this.deps.dialogue.setDialogueStyle(styleName),
+        setQuickMenu: (visible) => this.deps.dialogue.setQuickMenuVisible(visible),
+        runPoemGame: async () => {
+          if (this.poemGame) {
+            await this.poemGame.run();
+          }
+        },
+      },
+    );
+
+    this.deps.scene.setEvaluators(
+      (ast) => this.py.evalExprSync(ast),
+      (expr) => {
+        const val = this.py.getVar(expr.trim());
+        return typeof val === "number" ? val : parseFloat(expr) || 0;
+      },
+    );
+  }
+
+  public attachPoemGame(poemGame: PoemGameScreen): void {
+    this.poemGame = poemGame;
+  }
+
+  public resetVariables(): void {
+    this.py.reset();
+    this.deps.dialogue.setDialogueStyle("normal");
+    this.deps.dialogue.setQuickMenuVisible(true);
+    this.deps.dialogue.setMonikaTextbox(false);
+  }
+
+  public stop(): void {
+    this.running = false;
+    this.abortToken += 1;
+    this.deps.scene.tear.hide();
+    this.deps.scene.invert.hide();
+    this.deps.poemView.hide();
+    this.deps.dialogue.hide();
+  }
+
+  public captureSaveSlot(slot: number): SaveSlot {
+    const scState = this.deps.scene.getSnapshotState();
+    const lastEntry = this.deps.persistence.history[this.deps.persistence.history.length - 1];
+    return {
+      slot,
+      label: this.currentLabel,
+      callStack: this.callStack.map((f) => ({
+        label: f.labelName,
+        index: Math.max(0, f.index - 1),
+      })),
+      chapter: Number(this.py.getVar("chapter") ?? 0),
+      savedAt: new Date().toLocaleString(),
+      caption: lastEntry ? lastEntry.what.slice(0, 42) : this.currentLabel,
+      thumbnail: this.deps.stage.captureThumbnailDataUrl(),
+      variables: this.py.exportVars(),
+      sceneState: {
+        bg: scState.bg,
+        sprites: scState.sprites,
+        music: this.deps.audio.getPlaying("music"),
+      },
+    };
+  }
+
+  public async restoreFromSaveSlot(slot: SaveSlot): Promise<void> {
+    this.stop();
+    this.resetVariables();
+    this.py.importVars(slot.variables);
+
+    if (slot.sceneState.bg) {
+      await this.deps.scene.setScene(slot.sceneState.bg);
+    }
+    for (const sp of slot.sceneState.sprites) {
+      await this.deps.scene.show(sp.imageName, sp.at);
+    }
+    if (slot.sceneState.music) {
+      await this.deps.audio.play("music", slot.sceneState.music).catch(() => {});
+    }
+
+    const token = ++this.abortToken;
+    this.running = true;
+    this.currentLabel = slot.label;
+    this.callStack = [];
+
+    for (const savedFrame of slot.callStack) {
+      const found = await this.findLabelNode(savedFrame.label);
+      if (found) {
+        this.callStack.push({
+          labelName: savedFrame.label,
+          statements: found.block,
+          index: savedFrame.index,
+          hasScope: false,
+        });
+      }
+    }
+
+    if (this.callStack.length === 0) {
+      await this.runFromLabel(slot.label);
+      return;
+    }
+
+    await this.runLoop(token);
+  }
+
+  public async runFromLabel(labelName: string): Promise<void> {
+    const token = ++this.abortToken;
+    this.running = true;
+    this.currentLabel = labelName;
+
+    // Special case: `poem` label invokes our interactive PoemGameScreen
+    if (labelName === "poem") {
+      await this.poemGame?.run();
+      this.running = false;
+      this.deps.onReturnToTitle();
+      return;
+    }
+
+    const found = await this.findLabelNode(labelName);
+    if (!found) {
+      console.error(`[ScriptVM] Label not found: ${labelName}`);
+      this.deps.onReturnToTitle();
+      return;
+    }
+
+    this.deps.persistence.markLabelSeen(labelName);
+    this.callStack = [
+      {
+        labelName,
+        statements: found.block,
+        index: 0,
+        hasScope: false,
+      },
+    ];
+
+    await this.runLoop(token);
+  }
+
+  private async runLoop(token: number): Promise<void> {
+    while (this.running && token === this.abortToken && this.callStack.length > 0) {
+      const frame = this.callStack[this.callStack.length - 1];
+      if (frame.index >= frame.statements.length) {
+        if (frame.hasScope) {
+          this.py.popScope();
+        }
+        this.callStack.pop();
+        continue;
+      }
+
+      const stmt = frame.statements[frame.index];
+      frame.index += 1;
+
+      try {
+        const control = await this.executeStatement(stmt, token);
+        if (control === "stop") {
+          break;
+        }
+      } catch (err) {
+        if (err instanceof JumpSignal) {
+          await this.performJump(err.target);
+          continue;
+        }
+        if (err instanceof RestartSignal) {
+          this.stop();
+          this.deps.onRestartAtLabel(err.label);
+          return;
+        }
+        throw err;
+      }
+    }
+
+    if (token === this.abortToken && this.running) {
+      this.running = false;
+      this.deps.dialogue.hide();
+      this.deps.onReturnToTitle();
+    }
+  }
+
+  private async performJump(target: string): Promise<void> {
+    for (const f of this.callStack) {
+      if (f.hasScope) {
+        this.py.popScope();
+      }
+    }
+    this.callStack.length = 0;
+
+    const found = await this.findLabelNode(target);
+    if (found) {
+      this.currentLabel = target;
+      this.deps.persistence.markLabelSeen(target);
+      this.callStack.push({
+        labelName: target,
+        statements: found.block,
+        index: 0,
+        hasScope: false,
+      });
+    } else {
+      console.warn(`[ScriptVM] Jump target not found: ${target}`);
+    }
+  }
+
+  private async executeStatement(
+    stmt: ScriptStatement,
+    token: number,
+  ): Promise<"continue" | "stop"> {
+    if (!this.running || token !== this.abortToken) {
+      return "stop";
+    }
+
+    switch (stmt.type) {
+      case "say": {
+        const s = stmt as Extract<ScriptStatement, { type: "say" }>;
+        const speaker = this.resolveSpeaker(s.who);
+        const text = this.interpolateText(s.what);
+        this.deps.persistence.addHistory(speaker, text);
+        const interact = s.interact !== false;
+        await this.deps.dialogue.showLine(speaker, text, interact);
+        return "continue";
+      }
+
+      case "scene": {
+        const s = stmt as Extract<ScriptStatement, { type: "scene" }>;
+        const resolved = this.resolveImspecDisplay(s.imspec);
+        if (resolved.name) {
+          await this.deps.scene.setScene(resolved.name, {
+            layer: s.layer,
+            at: s.imspec.at ?? [],
+            paramText: resolved.paramText,
+          });
+        }
+        return "continue";
+      }
+
+      case "show": {
+        const s = stmt as Extract<ScriptStatement, { type: "show" }>;
+        const resolved = this.resolveImspecDisplay(s.imspec);
+        if (resolved.name || resolved.def) {
+          await this.deps.scene.show(resolved.name, s.imspec.at ?? [], {
+            tag: s.imspec.tag,
+            layer: s.imspec.layer,
+            zorder: s.imspec.zorder,
+            paramText: resolved.paramText,
+            def: resolved.def,
+          });
+        }
+        return "continue";
+      }
+
+      case "hide": {
+        const s = stmt as Extract<ScriptStatement, { type: "hide" }>;
+        const name = s.imspec.tag || s.imspec.name.join(" ");
+        if (name) {
+          await this.deps.scene.hide(name);
+        }
+        return "continue";
+      }
+
+      case "showLayer": {
+        const s = stmt as Extract<ScriptStatement, { type: "showLayer" }>;
+        this.deps.scene.showLayer(s.layer, s.at);
+        return "continue";
+      }
+
+      case "with": {
+        const s = stmt as Extract<ScriptStatement, { type: "with" }>;
+        let resolvedMs: number | undefined;
+        if (s.exprAst && s.expr?.startsWith("Dissolve")) {
+          const val = await this.py.evalExpr(s.exprAst);
+          if (typeof val === "number") {
+            resolvedMs = val * 1000;
+          }
+        }
+        await this.deps.scene.runTransition(s.expr, resolvedMs);
+        return "continue";
+      }
+
+      case "play": {
+        const s = stmt as Extract<ScriptStatement, { type: "play" }>;
+        await this.handlePlay(s.channel, s.args);
+        return "continue";
+      }
+
+      case "queue": {
+        const s = stmt as Extract<ScriptStatement, { type: "queue" }>;
+        const track = this.extractFirstTrackToken(s.args);
+        if (track) {
+          this.deps.audio.queueTrack(this.mapChannel(s.channel), track);
+        }
+        return "continue";
+      }
+
+      case "stop": {
+        const s = stmt as Extract<ScriptStatement, { type: "stop" }>;
+        const fadeMatch = /fadeout\s+([0-9]+(?:\.[0-9]+)?)/.exec(s.args);
+        const fadeout = fadeMatch ? parseFloat(fadeMatch[1]) : 0;
+        this.deps.audio.stop(this.mapChannel(s.channel), fadeout);
+        return "continue";
+      }
+
+      case "pause": {
+        const s = stmt as Extract<ScriptStatement, { type: "pause" }>;
+        let sec: number | null = null;
+        if (s.durationAst) {
+          const v = await this.py.evalExpr(s.durationAst);
+          sec = typeof v === "number" ? v : null;
+        } else if (s.duration) {
+          const n = parseFloat(s.duration);
+          sec = Number.isNaN(n) ? null : n;
+        }
+        await this.handlePause(sec);
+        return "continue";
+      }
+
+      case "window": {
+        const s = stmt as Extract<ScriptStatement, { type: "window" }>;
+        if (s.mode === "hide") {
+          this.deps.dialogue.hide();
+        }
+        return "continue";
+      }
+
+      case "screen": {
+        const s = stmt as Extract<ScriptStatement, { type: "screen" }>;
+        let args: unknown[] = [];
+        const kwargs: Record<string, unknown> = {};
+        if (s.callAst && s.callAst.t === "call") {
+          for (const a of s.callAst.args) {
+            args.push(await this.py.evalExpr(a));
+          }
+          for (const kw of s.callAst.kwargs) {
+            kwargs[kw.k] = await this.py.evalExpr(kw.v);
+          }
+        }
+        const res = await this.handleScreenAction(s.action, s.name, args, kwargs);
+        this.py.setVar("_return", res);
+        return "continue";
+      }
+
+      case "jump": {
+        const s = stmt as Extract<ScriptStatement, { type: "jump" }>;
+        const target = s.expression && s.targetAst
+          ? String(await this.py.evalExpr(s.targetAst))
+          : s.target;
+        await this.performJump(target);
+        if (this.callStack.length === 0) {
+          return "stop";
+        }
+        return "continue";
+      }
+
+      case "call": {
+        const s = stmt as Extract<ScriptStatement, { type: "call" }>;
+        const target = s.expression && s.labelAst
+          ? String(await this.py.evalExpr(s.labelAst))
+          : s.label;
+
+        if (target === "poem") {
+          await this.poemGame?.run();
+          return "continue";
+        }
+
+        const found = await this.findLabelNode(target);
+        if (!found) {
+          console.warn(`[ScriptVM] Call target not found: ${target}`);
+          return "continue";
+        }
+
+        this.currentLabel = target;
+        this.deps.persistence.markLabelSeen(target);
+
+        const paramDefs = found.paramDefs ?? found.params.map((p) => ({ name: p, defaultAst: null }));
+        if (paramDefs.length > 0) {
+          const locals: Record<string, unknown> = {};
+          for (const p of paramDefs) {
+            locals[p.name] = p.defaultAst ? await this.py.evalExpr(p.defaultAst) : null;
+          }
+          let posIdx = 0;
+          for (const arg of s.args ?? []) {
+            const val = arg.ast ? await this.py.evalExpr(arg.ast) : null;
+            if (arg.name) {
+              locals[arg.name] = val;
+            } else if (posIdx < paramDefs.length) {
+              locals[paramDefs[posIdx].name] = val;
+              posIdx += 1;
+            }
+          }
+          this.py.pushScope(locals);
+          this.callStack.push({
+            labelName: target,
+            statements: found.block,
+            index: 0,
+            hasScope: true,
+          });
+        } else {
+          this.callStack.push({
+            labelName: target,
+            statements: found.block,
+            index: 0,
+            hasScope: false,
+          });
+        }
+        return "continue";
+      }
+
+      case "return": {
+        const popped = this.callStack.pop();
+        if (popped?.hasScope) {
+          this.py.popScope();
+        }
+        return "continue";
+      }
+
+      case "label": {
+        const s = stmt as Extract<ScriptStatement, { type: "label" }>;
+        this.currentLabel = s.name;
+        this.deps.persistence.markLabelSeen(s.name);
+        this.callStack.push({
+          labelName: s.name,
+          statements: s.block,
+          index: 0,
+          hasScope: false,
+        });
+        return "continue";
+      }
+
+      case "menu": {
+        const s = stmt as Extract<ScriptStatement, { type: "menu" }>;
+        const promptItem = s.items.find((item) => item.block === null && item.caption);
+        if (promptItem && promptItem.caption) {
+          const text = this.interpolateText(promptItem.caption);
+          this.deps.dialogue.showStaticPrompt(null, text);
+        }
+
+        const visibleChoices = [];
+        for (const item of s.items) {
+          if (item.block === null || !item.caption) {
+            continue;
+          }
+          const ok = item.condAst
+            ? this.py.isTruthy(await this.py.evalExpr(item.condAst))
+            : true;
+          if (ok) {
+            visibleChoices.push(item);
+          }
+        }
+
+        if (visibleChoices.length > 0) {
+          const labels = visibleChoices.map((item) =>
+            this.interpolateText(item.caption ?? ""),
+          );
+          const isRigged =
+            this.deps.persistence.data.playthrough === 2 &&
+            labels.some((l) => l.toLowerCase().includes("monika"));
+          const chosenIndex = await this.deps.dialogue.showChoices(labels, isRigged);
+          const chosen = visibleChoices[chosenIndex];
+          if (chosen && chosen.block) {
+            this.callStack.push({
+              labelName: this.currentLabel,
+              statements: chosen.block,
+              index: 0,
+              hasScope: false,
+            });
+          }
+        }
+        return "continue";
+      }
+
+      case "if": {
+        const s = stmt as Extract<ScriptStatement, { type: "if" }>;
+        for (const branch of s.branches) {
+          const ok = branch.condAst
+            ? this.py.isTruthy(await this.py.evalExpr(branch.condAst))
+            : branch.condition === "True";
+          if (ok) {
+            this.callStack.push({
+              labelName: this.currentLabel,
+              statements: branch.block,
+              index: 0,
+              hasScope: false,
+            });
+            break;
+          }
+        }
+        return "continue";
+      }
+
+      case "python": {
+        const s = stmt as Extract<ScriptStatement, { type: "python" }>;
+        if (s.pyAst && s.pyAst.length > 0) {
+          await this.py.execBlock(s.pyAst);
+        }
+        return "continue";
+      }
+
+      default: {
+        return "continue";
+      }
+    }
+  }
+
+  private resolveImspecDisplay(imspec: {
+    name: string[];
+    expression?: string;
+    exprAst?: PyExprNode | null;
+  }): { name: string; paramText?: string; def?: ImageDef } {
+    if (imspec.exprAst) {
+      const evaluated = this.py.evalExprSync(imspec.exprAst);
+      if (typeof evaluated === "string") {
+        const unquoted = evaluated.replace(/^["']|["']$/g, "");
+        return { name: unquoted };
+      }
+    }
+
+    const parts = imspec.name;
+    // Handle ParameterizedText shows like `console_text "[text]"` or `splash_warning "[splash_message]"`
+    if (parts.length >= 2) {
+      const last = parts[parts.length - 1];
+      if (
+        (last.startsWith('"') && last.endsWith('"')) ||
+        (last.startsWith("'") && last.endsWith("'"))
+      ) {
+        const baseName = parts.slice(0, -1).join(" ");
+        const paramText = this.interpolateText(last.slice(1, -1));
+        return { name: baseName, paramText };
+      }
+    }
+
+    const joined = parts.join(" ");
+    // Handle `Solid("...")` or `Text("...")` inline expressions
+    if (joined.startsWith("Solid(")) {
+      const m = /Solid\(["']([^"']+)["']\)/.exec(joined);
+      if (m) {
+        const hex = m[1].startsWith("#") ? m[1] : `#${m[1]}`;
+        return { name: joined, def: { kind: "color", hex } };
+      }
+    }
+
+    return { name: joined };
+  }
+
+  private async handleScreenAction(
+    action: "show" | "hide" | "call",
+    name: string,
+    args: unknown[],
+    kwargs: Record<string, unknown>,
+  ): Promise<unknown> {
+    if (name === "poem") {
+      if (action === "hide") {
+        this.deps.poemView.hide();
+        return null;
+      }
+      const poem = args[0] as PoemDef | undefined;
+      const paper = typeof kwargs.paper === "string" ? kwargs.paper : "paper";
+      if (poem) {
+        this.deps.poemView.show(
+          poem,
+          paper,
+          !this.deps.persistence.data.first_poem,
+        );
+      }
+      return null;
+    }
+
+    if (name === "tear") {
+      if (action === "hide") {
+        this.deps.scene.tear.hide();
+      } else {
+        this.deps.scene.tear.show(
+          Number(args[0] ?? 10),
+          Number(kwargs.offtimeMult ?? args[1] ?? 1),
+          Number(kwargs.ontimeMult ?? args[2] ?? 1),
+          Number(args[3] ?? -10),
+          Number(args[4] ?? 10),
+        );
+      }
+      return null;
+    }
+
+    if (name === "invert") {
+      if (action === "hide") {
+        this.deps.scene.invert.hide();
+      } else {
+        this.deps.scene.invert.show(Number(args[0] ?? 0), Number(args[1] ?? 0));
+      }
+      return null;
+    }
+
+    if (name === "fake_skip_indicator") {
+      this.deps.modals.setSkipIndicator(action !== "hide");
+      return null;
+    }
+
+    if (name === "quick_menu") {
+      this.deps.dialogue.setQuickMenuVisible(action !== "hide");
+      return null;
+    }
+
+    if (name === "dialog" && action === "call") {
+      const msg = this.interpolateText(String(kwargs.message ?? args[0] ?? ""));
+      await this.deps.modals.showDialog(msg);
+      return true;
+    }
+
+    if (name === "confirm" && action === "call") {
+      const msg = this.interpolateText(String(kwargs.message ?? args[0] ?? ""));
+      const glitched = this.deps.persistence.data.playthrough === 2;
+      return this.deps.modals.showConfirm(msg, "Yes", "No", glitched);
+    }
+
+    return null;
+  }
+
+  private async handlePythonMenu(
+    items: Array<[string, unknown]>,
+  ): Promise<unknown> {
+    const labels = items.map(([cap]) => this.interpolateText(String(cap)));
+    const idx = await this.deps.dialogue.showChoices(labels, false);
+    return items[idx]?.[1] ?? null;
+  }
+
+  private async handlePause(seconds?: number | null): Promise<void> {
+    if (seconds === undefined || seconds === null) {
+      if (!this.deps.poemView) {
+        await this.deps.dialogue.waitForClick();
+      } else {
+        // Wait for either poem dismiss or dialogue click
+        await Promise.race([
+          this.deps.poemView.waitForDismiss(),
+          this.deps.dialogue.waitForClick(),
+        ]);
+      }
+      return;
+    }
+    if (seconds <= 0) {
+      return;
+    }
+    const ms = this.deps.dialogue.isSkipping() ? Math.min(seconds * 1000, 60) : seconds * 1000;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  private mapChannel(channel: string): AudioChannelName {
+    if (channel === "music_poem") return "music_poem";
+    if (channel === "sound" || channel === "sound2") return "sound";
+    if (channel === "sfx") return "sfx";
+    return "music";
+  }
+
+  private extractFirstTrackToken(args: string): string {
+    const tokens = args.trim().split(/\s+/);
+    for (const tok of tokens) {
+      if (tok === "fadein" || tok === "fadeout" || tok === "noloop" || tok === "loop") {
+        continue;
+      }
+      const cleaned = tok.replace(/^["']|["']$/g, "");
+      if (cleaned) {
+        return cleaned;
+      }
+    }
+    return "";
+  }
+
+  private async handlePlay(channel: string, args: string): Promise<void> {
+    const trimmed = args.trim();
+    const fadeMatch = /fadein\s+([0-9]+(?:\.[0-9]+)?)/.exec(trimmed);
+    const fadein = fadeMatch ? parseFloat(fadeMatch[1]) : 0;
+    const noloop = /\bnoloop\b/.test(trimmed);
+    const track = this.extractFirstTrackToken(trimmed);
+    if (!track) {
+      return;
+    }
+    try {
+      await this.deps.audio.play(this.mapChannel(channel), track, {
+        fadein,
+        loop: noloop ? false : undefined,
+      });
+    } catch (err) {
+      console.warn(`[ScriptVM] Audio play skipped for "${track}":`, err);
+    }
+  }
+
+  private resolveSpeaker(who: string | null): string | null {
+    if (!who) {
+      return null;
+    }
+    const def = this.deps.characters[who];
+    if (!def) {
+      return who;
+    }
+    if (def.dynamic && def.name) {
+      const val = this.py.getVar(def.name);
+      if (typeof val === "string") {
+        return val;
+      }
+      return def.name;
+    }
+    return def.name;
+  }
+
+  private interpolateText(raw: string): string {
+    return raw.replace(/\[([a-zA-Z0-9_.\[\]]+)\]/g, (_match, expr: string) => {
+      if (expr === "player") {
+        return String(this.py.getVar("player") || this.deps.persistence.data.playername || "MC");
+      }
+      const val = this.py.getVar(expr);
+      if (val === undefined || val === null) {
+        return `[${expr}]`;
+      }
+      return String(val);
+    });
+  }
+
+  private async loadScript(stem: string): Promise<ScriptFile> {
+    const cached = this.scriptCache.get(stem);
+    if (cached) {
+      return cached;
+    }
+    const loaded = await this.deps.loadScript(stem);
+    this.scriptCache.set(stem, loaded);
+    return loaded;
+  }
+
+  private async findLabelNode(
+    labelName: string,
+  ): Promise<Extract<ScriptStatement, { type: "label" }> | null> {
+    const stem = this.deps.scriptIndex.labels[labelName];
+    if (!stem) {
+      return null;
+    }
+    const script = await this.loadScript(stem);
+    return findLabelObjInList(script.statements, labelName);
+  }
+}
+
+function findLabelObjInList(
+  statements: ScriptStatement[],
+  labelName: string,
+): Extract<ScriptStatement, { type: "label" }> | null {
+  for (const stmt of statements) {
+    if (stmt.type === "label") {
+      const lbl = stmt as Extract<ScriptStatement, { type: "label" }>;
+      if (lbl.name === labelName) {
+        return lbl;
+      }
+      const nested = findLabelObjInList(lbl.block, labelName);
+      if (nested) {
+        return nested;
+      }
+    } else if (stmt.type === "if") {
+      const ifStmt = stmt as Extract<ScriptStatement, { type: "if" }>;
+      for (const branch of ifStmt.branches) {
+        const nested = findLabelObjInList(branch.block, labelName);
+        if (nested) {
+          return nested;
+        }
+      }
+    } else if (stmt.type === "menu") {
+      const menuStmt = stmt as Extract<ScriptStatement, { type: "menu" }>;
+      for (const item of menuStmt.items) {
+        if (item.block) {
+          const nested = findLabelObjInList(item.block, labelName);
+          if (nested) {
+            return nested;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}

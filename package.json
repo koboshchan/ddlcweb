@@ -1,0 +1,25 @@
+{
+  "name": "ddlcweb",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Near pixel-perfect web port of Doki Doki Literature Club! (bring your own ddlc-win.zip)",
+  "scripts": {
+    "prepare-assets": "python3 tools/prepare_assets.py",
+    "dev": "python3 tools/prepare_assets.py && vite",
+    "build": "python3 tools/prepare_assets.py && tsc --noEmit && vite build",
+    "build:app": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "python3 -m unittest discover -s tests -v",
+    "check:clean": "python3 tools/check_clean_repo.py"
+  },
+  "dependencies": {
+    "@wasm-audio-decoders/ogg-vorbis": "^0.1.18",
+    "pixi.js": "^8.9.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}

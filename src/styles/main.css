@@ -1,0 +1,871 @@
+:root {
+  color-scheme: only light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: #000000;
+  font-family: "Aller_Rg", sans-serif;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #000000;
+}
+
+#stage-frame {
+  position: relative;
+  width: 1280px;
+  height: 720px;
+  overflow: hidden;
+  background-color: #ffffff;
+  transform-origin: center center;
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.85);
+}
+
+#pixi-root {
+  position: absolute;
+  inset: 0;
+  width: 1280px;
+  height: 720px;
+}
+
+#pixi-root canvas {
+  display: block;
+  width: 1280px;
+  height: 720px;
+}
+
+#ui-root {
+  position: absolute;
+  inset: 0;
+  width: 1280px;
+  height: 720px;
+  pointer-events: none;
+}
+
+.is-hidden {
+  display: none !important;
+}
+
+/* --- Main Menu Navigation (DDLC screens.rpy / gui.rpy) --- */
+
+.ddlc-main-nav {
+  position: absolute;
+  left: 80px;
+  bottom: 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: auto;
+  z-index: 20;
+}
+
+.ddlc-nav-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 2px 4px;
+  text-align: left;
+  cursor: pointer;
+  font-family: "RifficFree-Bold", "Aller_Rg", sans-serif;
+  font-size: 24px;
+  line-height: 32px;
+  color: #ffffff;
+  letter-spacing: 0.4px;
+  text-shadow:
+    -2px -2px 0 #bb5599,
+     2px -2px 0 #bb5599,
+    -2px  2px 0 #bb5599,
+     2px  2px 0 #bb5599,
+     0px -2px 0 #bb5599,
+     0px  2px 0 #bb5599,
+    -2px  0px 0 #bb5599,
+     2px  0px 0 #bb5599,
+     2px  2px 0 #bb5599;
+  transition: text-shadow 0.08s ease;
+}
+
+.ddlc-nav-btn:hover,
+.ddlc-nav-btn:focus-visible,
+.ddlc-nav-btn--active {
+  outline: none;
+  color: #ffffff;
+  text-shadow:
+    -2px -2px 0 #ffaacc,
+     2px -2px 0 #ffaacc,
+    -2px  2px 0 #ffaacc,
+     2px  2px 0 #ffaacc,
+     0px -2px 0 #ffaacc,
+     0px  2px 0 #ffaacc,
+    -2px  0px 0 #ffaacc,
+     2px  0px 0 #ffaacc,
+     2px  2px 0 #ffaacc;
+}
+
+.ddlc-nav-btn--secondary {
+  margin-top: 10px;
+  font-size: 16px;
+  line-height: 22px;
+  opacity: 0.92;
+}
+
+/* --- Dialogue Overlay (exact 1280x720 gui.rpy layout) --- */
+
+.ddlc-dialogue-layer {
+  position: absolute;
+  inset: 0;
+  width: 1280px;
+  height: 720px;
+  pointer-events: auto;
+  z-index: 30;
+}
+
+.ddlc-textbox-wrap {
+  position: absolute;
+  left: 50%;
+  bottom: 7px;
+  transform: translateX(-50%);
+  width: 816px;
+  height: 182px;
+}
+
+.ddlc-namebox {
+  position: absolute;
+  left: 34px;
+  top: 0;
+  min-width: 168px;
+  height: 39px;
+  padding: 0 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  font-family: "RifficFree-Bold", "Aller_Rg", sans-serif;
+  font-size: 24px;
+  color: #ffffff;
+  text-shadow:
+    -2px -2px 0 #bb5599,
+     2px -2px 0 #bb5599,
+    -2px  2px 0 #bb5599,
+     2px  2px 0 #bb5599,
+     0px -2px 0 #bb5599,
+     0px  2px 0 #bb5599,
+    -2px  0px 0 #bb5599,
+     2px  0px 0 #bb5599,
+     1px  1px 0 #bb5599;
+}
+
+.ddlc-textbox {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 816px;
+  height: 146px;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  padding: 26px 36px 28px 36px;
+}
+
+.ddlc-dialogue-text {
+  font-family: "Aller_Rg", sans-serif;
+  font-size: 24px;
+  line-height: 1.3;
+  color: #ffffff;
+  text-shadow:
+    -1.5px -1.5px 0 rgba(0, 0, 0, 0.72),
+     1.5px -1.5px 0 rgba(0, 0, 0, 0.72),
+    -1.5px  1.5px 0 rgba(0, 0, 0, 0.72),
+     1.5px  1.5px 0 rgba(0, 0, 0, 0.72),
+     0px   -1.5px 0 rgba(0, 0, 0, 0.72),
+     0px    1.5px 0 rgba(0, 0, 0, 0.72),
+    -1.5px  0px   0 rgba(0, 0, 0, 0.72),
+     1.5px  0px   0 rgba(0, 0, 0, 0.72);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ddlc-dialogue-text--edited {
+  font-family: "VerilySerifMono", monospace;
+  letter-spacing: 8px;
+  text-shadow:
+    -3px -3px 0 #000000,
+     3px -3px 0 #000000,
+    -3px  3px 0 #000000,
+     3px  3px 0 #000000,
+     0px -3px 0 #000000,
+     0px  3px 0 #000000,
+    -3px  0px 0 #000000,
+     3px  0px 0 #000000;
+}
+
+.ddlc-ctc {
+  position: absolute;
+  right: 22px;
+  bottom: 24px;
+  width: 18px;
+  height: 18px;
+  background-repeat: no-repeat;
+  background-size: contain;
+  animation: ddlc-ctc-bob 0.8s ease-in-out infinite;
+}
+
+@keyframes ddlc-ctc-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translateY(4px);
+    opacity: 1;
+  }
+}
+
+.ddlc-quick-menu {
+  position: absolute;
+  left: 50%;
+  bottom: 15px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 16px;
+  z-index: 35;
+}
+
+.ddlc-quick-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 2px 4px;
+  cursor: pointer;
+  font-family: "Aller_Rg", sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: #552222;
+}
+
+.ddlc-quick-btn:hover,
+.ddlc-quick-btn.is-active {
+  color: #ffcccc;
+  text-shadow: 0 0 2px #bb5599;
+}
+
+/* --- Choice Menu --- */
+
+.ddlc-choice-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding-bottom: 160px;
+  gap: 22px;
+  background: rgba(0, 0, 0, 0.12);
+  pointer-events: auto;
+  z-index: 40;
+}
+
+.ddlc-choice-btn {
+  appearance: none;
+  border: none;
+  width: 420px;
+  min-height: 35px;
+  padding: 6px 32px;
+  cursor: pointer;
+  background-color: #ffe6f4;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  font-family: "Aller_Rg", sans-serif;
+  font-size: 24px;
+  color: #000000;
+  text-align: center;
+  transition: transform 0.08s ease;
+}
+
+.ddlc-choice-btn:hover {
+  color: #ffaa99;
+}
+
+/* --- Modals (confirm, dialog, name_input, ToS) --- */
+
+.ddlc-modal-layer {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  z-index: 70;
+}
+
+.ddlc-confirm-glitch {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.ddlc-confirm-frame {
+  position: relative;
+  min-width: 480px;
+  max-width: 760px;
+  padding: 36px 44px;
+  background: #ffe6f4;
+  border: 4px solid #ffbde1;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+  z-index: 2;
+}
+
+.ddlc-confirm-prompt {
+  font-family: "Aller_Rg", sans-serif;
+  font-size: 22px;
+  line-height: 1.4;
+  color: #000000;
+  text-align: center;
+  white-space: pre-wrap;
+}
+
+.ddlc-name-input {
+  width: 300px;
+  padding: 8px 14px;
+  font-family: "Aller_Rg", sans-serif;
+  font-size: 24px;
+  text-align: center;
+  border: 3px solid #bb5599;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #3a1f2d;
+  outline: none;
+}
+
+.ddlc-confirm-actions {
+  display: flex;
+  gap: 36px;
+}
+
+.ddlc-confirm-btn {
+  text-align: center;
+}
+
+.ddlc-skip-indicator {
+  position: absolute;
+  left: 0;
+  top: 10px;
+  padding: 5px 50px 5px 16px;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  font-family: "Aller_Rg", sans-serif;
+  font-size: 16px;
+  color: #ffffff;
+  z-index: 65;
+}
+
+.ddlc-notify {
+  position: absolute;
+  left: 0;
+  top: 45px;
+  padding: 5px 40px 5px 16px;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  font-family: "Aller_Rg", sans-serif;
+  font-size: 16px;
+  color: #ffffff;
+  z-index: 65;
+}
+
+/* --- Poem Viewer (`screen poem`) --- */
+
+.ddlc-poem-layer {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  z-index: 45;
+  cursor: pointer;
+}
+
+.ddlc-poem-paper {
+  position: absolute;
+  left: 280px;
+  top: 0;
+  width: 720px;
+  height: 720px;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  overflow-y: auto;
+  padding: 40px 56px 56px 56px;
+}
+
+.ddlc-poem-viewport {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  color: #000000;
+}
+
+.ddlc-poem-title {
+  font-size: 1.12em;
+  margin-bottom: 6px;
+}
+
+.ddlc-poem-body {
+  white-space: pre-wrap;
+  line-height: 1.38;
+}
+
+.ddlc-poem--sayori {
+  font-family: "s1", "Aller_Rg", sans-serif;
+  font-size: 34px;
+}
+
+.ddlc-poem--natsuki {
+  font-family: "n1", "Aller_Rg", sans-serif;
+  font-size: 28px;
+}
+
+.ddlc-poem--monika {
+  font-family: "m1", "Aller_Rg", sans-serif;
+  font-size: 34px;
+}
+
+.ddlc-poem--yuri1 {
+  font-family: "y1", "Aller_Rg", sans-serif;
+  font-size: 32px;
+}
+
+.ddlc-poem--yuri2 {
+  font-family: "y2", "Aller_Rg", sans-serif;
+  font-size: 40px;
+}
+
+.ddlc-poem--yuri3 {
+  font-family: "y3", "Aller_Rg", sans-serif;
+  font-size: 22px;
+  letter-spacing: -1.5px;
+  line-height: 1.25;
+}
+
+.ddlc-poem-dismiss {
+  position: absolute;
+  left: 1050px;
+  top: 590px;
+  width: 196px;
+  height: 92px;
+  background-repeat: no-repeat;
+  background-size: contain;
+  pointer-events: none;
+}
+
+/* --- Poem Minigame (`script-poemgame.rpy`) --- */
+
+.ddlc-poemgame-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  z-index: 35;
+}
+
+.ddlc-poemgame-counter {
+  position: absolute;
+  left: 810px;
+  top: 80px;
+  font-family: "Halogen", "Aller_Rg", sans-serif;
+  font-size: 30px;
+  color: #000000;
+}
+
+.ddlc-poemgame-col {
+  position: absolute;
+  top: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.ddlc-poemgame-col--left {
+  left: 440px;
+}
+
+.ddlc-poemgame-col--right {
+  left: 680px;
+}
+
+.ddlc-poemgame-word {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0;
+  height: 36px;
+  text-align: left;
+  cursor: pointer;
+  font-family: "Halogen", "Aller_Rg", sans-serif;
+  font-size: 30px;
+  color: #000000;
+}
+
+.ddlc-poemgame-word:hover {
+  transform: translateX(-3px);
+  text-shadow:
+    0 0 3px #ffeeff,
+    0 0 2px #ffccff,
+    0 0 1px #ffaaff;
+}
+
+.ddlc-poemgame-stickers {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ddlc-sticker {
+  position: absolute;
+  width: 160px;
+  height: 160px;
+  background-repeat: no-repeat;
+  background-position: center bottom;
+  background-size: contain;
+}
+
+/* --- Game Menu (`Save`, `Load`, `History`, `Settings`, `About`) --- */
+
+.ddlc-gamemenu-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  z-index: 55;
+  overflow: hidden;
+}
+
+.ddlc-gamemenu-bg {
+  position: absolute;
+  inset: -200px;
+  background-repeat: repeat;
+  animation: ddlc-menubg-scroll 3s linear infinite;
+}
+
+@keyframes ddlc-menubg-scroll {
+  from {
+    transform: translate(0, 0);
+  }
+  to {
+    transform: translate(-100px, -100px);
+  }
+}
+
+.ddlc-gamemenu-overlay {
+  position: absolute;
+  inset: 0;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+}
+
+.ddlc-gamemenu-title {
+  position: absolute;
+  left: 50px;
+  top: 40px;
+  font-family: "RifficFree-Bold", sans-serif;
+  font-size: 38px;
+  color: #ffffff;
+  text-shadow:
+    -3px -3px 0 #bb5599,
+     3px -3px 0 #bb5599,
+    -3px  3px 0 #bb5599,
+     3px  3px 0 #bb5599,
+     2px  2px 0 #bb5599;
+}
+
+.ddlc-gamemenu-nav {
+  position: absolute;
+  left: 80px;
+  top: 150px;
+  bottom: 40px;
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ddlc-gamemenu-content {
+  position: absolute;
+  left: 340px;
+  top: 120px;
+  right: 40px;
+  bottom: 40px;
+  overflow-y: auto;
+  padding: 8px 16px;
+}
+
+.ddlc-slot-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 276px);
+  gap: 14px;
+}
+
+.ddlc-slot-card {
+  appearance: none;
+  border: none;
+  width: 276px;
+  height: 206px;
+  padding: 10px;
+  background-color: rgba(255, 240, 248, 0.9);
+  background-size: 100% 100%;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.ddlc-slot-thumb {
+  width: 256px;
+  height: 144px;
+  background: #f5dce9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9e748a;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+.ddlc-slot-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ddlc-slot-meta {
+  font-size: 13px;
+  line-height: 1.2;
+  color: #333333;
+  text-align: center;
+  white-space: pre-wrap;
+}
+
+.ddlc-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ddlc-history-row {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 16px;
+  font-size: 20px;
+  color: #2b1622;
+}
+
+.ddlc-history-who {
+  text-align: right;
+  font-family: "RifficFree-Bold", sans-serif;
+  color: #bb5599;
+}
+
+.ddlc-history-what {
+  white-space: pre-wrap;
+}
+
+.ddlc-history-empty {
+  font-size: 22px;
+  color: #553344;
+}
+
+.ddlc-prefs-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 520px;
+  color: #2b1622;
+}
+
+.ddlc-pref-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.ddlc-pref-label {
+  font-family: "RifficFree-Bold", sans-serif;
+  font-size: 20px;
+  color: #ffffff;
+  text-shadow:
+    -1.5px -1.5px 0 #bb5599,
+     1.5px -1.5px 0 #bb5599,
+    -1.5px  1.5px 0 #bb5599,
+     1.5px  1.5px 0 #bb5599;
+}
+
+.ddlc-pref-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "Halogen", sans-serif;
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.ddlc-about-box {
+  max-width: 680px;
+  font-size: 20px;
+  line-height: 1.5;
+  color: #2b1622;
+}
+
+/* --- Virtual `characters/` File Drawer --- */
+
+.ddlc-vfs-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 8, 16, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  z-index: 80;
+}
+
+.ddlc-vfs-modal {
+  width: 680px;
+  max-height: 540px;
+  background: #fff5fa;
+  border: 4px solid #ffbde1;
+  border-radius: 6px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: #3a1f2d;
+}
+
+.ddlc-vfs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: #ffe6f4;
+  border-bottom: 2px solid #ffbde1;
+}
+
+.ddlc-vfs-title {
+  margin: 0;
+  font-family: "RifficFree-Bold", sans-serif;
+  font-size: 20px;
+  color: #ffffff;
+  text-shadow:
+    -1.5px -1.5px 0 #bb5599,
+     1.5px -1.5px 0 #bb5599,
+    -1.5px  1.5px 0 #bb5599,
+     1.5px  1.5px 0 #bb5599;
+}
+
+.ddlc-vfs-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ddlc-vfs-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: #ffffff;
+  border: 1px solid #f0c6dd;
+  border-radius: 4px;
+  font-size: 16px;
+}
+
+.ddlc-vfs-meta {
+  font-size: 13px;
+  color: #7c566a;
+}
+
+.ddlc-vfs-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ddlc-btn-small {
+  appearance: none;
+  border: 2px solid #bb5599;
+  background: #ffe6f4;
+  color: #552244;
+  font-family: "Aller_Rg", sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.ddlc-btn-small:hover {
+  background: #ffbde1;
+}
+
+.ddlc-btn-danger {
+  border-color: #c93b5b;
+  background: #ffe3ea;
+  color: #8a1632;
+}
+
+.ddlc-btn-danger:hover {
+  background: #ffc0d0;
+}
+
+.ddlc-vfs-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: #ffe6f4;
+  border-top: 2px solid #ffbde1;
+  font-size: 13px;
+  color: #6b4158;
+}
+
+/* --- Audio Unlock Pill --- */
+
+.ddlc-status-pill {
+  position: absolute;
+  right: 16px;
+  top: 14px;
+  padding: 6px 12px;
+  background: rgba(255, 230, 244, 0.92);
+  border: 2px solid #bb5599;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #552244;
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 50;
+}

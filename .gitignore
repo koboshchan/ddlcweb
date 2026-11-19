@@ -1,0 +1,38 @@
+# --- Dependencies & Build Output ---
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# --- Extracted / Compiled DDLC Game Data ---
+# NOTHING derived from a copy of DDLC may ever be committed to this repo.
+# All extracted art, audio, fonts, character files, and compiled script data
+# live exclusively under public/game-assets/, src/generated/, and .cache/.
+public/game-assets/
+src/generated/
+.cache/
+*.rpa
+*.rpyc
+*.chr
+*.zip
+
+# --- Audio / Font Safety Net ---
+# Prevent accidental commits of extracted game media anywhere in the tree.
+*.ogg
+*.ttf
+*.TTF
+*.otf
+*.OTF
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- Editors & OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
