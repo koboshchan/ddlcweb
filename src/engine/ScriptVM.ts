@@ -62,6 +62,7 @@ export class ScriptVM {
   private callStack: Frame[] = [];
   private currentLabel = "start";
   private activeInteractiveFrame: Frame | null = null;
+  private skipNextHistoryAdd = false;
   private running = false;
   private abortToken = 0;
 
@@ -117,6 +118,7 @@ export class ScriptVM {
     this.running = false;
     this.abortToken += 1;
     this.activeInteractiveFrame = null;
+    this.skipNextHistoryAdd = false;
     this.deps.scene.tear.hide();
     this.deps.scene.invert.hide();
     this.deps.poemView.hide();
@@ -228,6 +230,11 @@ export class ScriptVM {
       return;
     }
 
+    const topFrame = this.callStack[this.callStack.length - 1];
+    this.skipNextHistoryAdd =
+      Boolean(slot.history && slot.history.length > 0) &&
+      topFrame?.statements[topFrame.index]?.type === "say";
+
     await this.runLoop(token);
   }
 
@@ -235,6 +242,7 @@ export class ScriptVM {
     const token = ++this.abortToken;
     this.running = true;
     this.currentLabel = labelName;
+    this.skipNextHistoryAdd = false;
     this.py.clearScopes();
 
     // Special case: `poem` label invokes our interactive PoemGameScreen
@@ -357,7 +365,11 @@ export class ScriptVM {
           this.deps.dialogue.setSkipping(false);
         }
 
-        this.deps.persistence.addHistory(speaker, text);
+        if (this.skipNextHistoryAdd) {
+          this.skipNextHistoryAdd = false;
+        } else {
+          this.deps.persistence.addHistory(speaker, text);
+        }
         this.activeInteractiveFrame = frame;
         await this.deps.dialogue.showLine(speaker, text, interact, wasSeen);
         this.deps.persistence.markLineSeen(lineKey);
