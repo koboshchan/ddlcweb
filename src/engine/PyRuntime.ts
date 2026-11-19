@@ -155,16 +155,32 @@ export class PyRuntime {
     this.installBuiltins();
   }
 
-  public pushScope(vars: Record<string, unknown> = {}): void {
+  public pushScope(vars: Record<string, unknown> = {}): Map<string, unknown> {
     const map = new Map<string, unknown>();
     for (const [k, v] of Object.entries(vars)) {
       map.set(k, v);
     }
     this.scopeStack.push(map);
+    return map;
   }
 
   public popScope(): void {
     this.scopeStack.pop();
+  }
+
+  public clearScopes(): void {
+    this.scopeStack.length = 0;
+  }
+
+  public exportScope(scopeMap: Map<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of scopeMap.entries()) {
+      const cloned = toJsonSafeValue(v);
+      if (cloned !== undefined) {
+        out[k] = cloned;
+      }
+    }
+    return out;
   }
 
   public getVar(name: string): unknown {
@@ -196,16 +212,25 @@ export class PyRuntime {
   }
 
   public exportVars(): Record<string, unknown> {
+    const skipGlobals = new Set([
+      "config",
+      "renpy",
+      "random",
+      "datetime",
+      "os",
+      "m",
+      "gui",
+      "style",
+      "_history_list",
+    ]);
     const out: Record<string, unknown> = {};
     for (const [k, v] of this.globals.entries()) {
-      if (
-        typeof v === "string" ||
-        typeof v === "number" ||
-        typeof v === "boolean" ||
-        v === null ||
-        Array.isArray(v)
-      ) {
-        out[k] = v;
+      if (skipGlobals.has(k)) {
+        continue;
+      }
+      const cloned = toJsonSafeValue(v);
+      if (cloned !== undefined) {
+        out[k] = cloned;
       }
     }
     return out;
@@ -213,7 +238,7 @@ export class PyRuntime {
 
   public importVars(vars: Record<string, unknown>): void {
     for (const [k, v] of Object.entries(vars)) {
-      this.globals.set(k, v);
+      this.globals.set(k, structuredClone(v));
     }
   }
 
@@ -1032,4 +1057,47 @@ export class PyRuntime {
     if (v instanceof Set) return v.size > 0;
     return Boolean(v);
   }
+}
+
+function toJsonSafeValue(v: unknown, depth = 0): unknown {
+  if (depth > 8) {
+    return undefined;
+  }
+  if (
+    v === null ||
+    typeof v === "string" ||
+    typeof v === "number" ||
+    typeof v === "boolean"
+  ) {
+    return v;
+  }
+  if (Array.isArray(v)) {
+    const out: unknown[] = [];
+    for (const item of v) {
+      const safe = toJsonSafeValue(item, depth + 1);
+      if (safe === undefined) {
+        return undefined;
+      }
+      out.push(safe);
+    }
+    return out;
+  }
+  if (typeof v === "object") {
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) {
+      return undefined;
+    }
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (typeof val === "function") {
+        return undefined;
+      }
+      const safe = toJsonSafeValue(val, depth + 1);
+      if (safe !== undefined) {
+        out[k] = safe;
+      }
+    }
+    return out;
+  }
+  return undefined;
 }

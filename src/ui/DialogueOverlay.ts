@@ -34,6 +34,7 @@ export class DialogueOverlay {
   private skipInterval: number | null = null;
   private dialogueStyle = "normal";
   private quickMenuVisible = true;
+  private monikaTextbox = false;
   private windowsHidden = false;
   private skipping = false;
   private autoForward = false;
@@ -144,8 +145,21 @@ export class DialogueOverlay {
   }
 
   public setMonikaTextbox(active: boolean): void {
+    this.monikaTextbox = active;
     const tex = active ? "gui/textbox_monika.png" : "gui/textbox.png";
     this.textboxEl.style.backgroundImage = `url("${this.assets.getAssetUrl(tex)}")`;
+  }
+
+  public getUiState(): {
+    dialogueStyle: string;
+    quickMenuVisible: boolean;
+    monikaTextbox: boolean;
+  } {
+    return {
+      dialogueStyle: this.dialogueStyle,
+      quickMenuVisible: this.quickMenuVisible,
+      monikaTextbox: this.monikaTextbox,
+    };
   }
 
   public setWindowsHidden(hidden: boolean): void {
@@ -249,6 +263,7 @@ export class DialogueOverlay {
     speaker: string | null,
     rawText: string,
     interact = true,
+    _seen = false,
   ): Promise<void> {
     this.clearTimers();
     this.layerEl.classList.remove("is-hidden");

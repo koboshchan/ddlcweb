@@ -9,7 +9,12 @@ import type {
   ScriptStatement,
 } from "../types/game-data";
 import type { AudioChannelName, AudioEngine } from "./AudioEngine";
-import type { Persistence, SaveSlot } from "./Persistence";
+import {
+  type BlockPathSegment,
+  type Persistence,
+  SAVE_FORMAT_VERSION,
+  type SaveSlot,
+} from "./Persistence";
 import { JumpSignal, PyRuntime, RestartSignal } from "./PyRuntime";
 import type { SceneManager } from "./SceneManager";
 import type { Stage } from "./Stage";
@@ -21,9 +26,10 @@ import type { PoemViewScreen } from "../ui/PoemViewScreen";
 
 interface Frame {
   labelName: string;
+  blockPath: BlockPathSegment[];
   statements: ScriptStatement[];
   index: number;
-  hasScope: boolean;
+  scopeMap?: Map<string, unknown>;
 }
 
 export interface ScriptVMDeps {
@@ -55,6 +61,7 @@ export class ScriptVM {
   private poemGame: PoemGameScreen | null = null;
   private callStack: Frame[] = [];
   private currentLabel = "start";
+  private activeInteractiveFrame: Frame | null = null;
   private running = false;
   private abortToken = 0;
 
@@ -109,6 +116,7 @@ export class ScriptVM {
   public stop(): void {
     this.running = false;
     this.abortToken += 1;
+    this.activeInteractiveFrame = null;
     this.deps.scene.tear.hide();
     this.deps.scene.invert.hide();
     this.deps.poemView.hide();
@@ -117,14 +125,31 @@ export class ScriptVM {
 
   public captureSaveSlot(slot: number): SaveSlot {
     const scState = this.deps.scene.getSnapshotState();
-    const lastEntry = this.deps.persistence.history[this.deps.persistence.history.length - 1];
+    const uiState = this.deps.dialogue.getUiState();
+    const lastEntry =
+      this.deps.persistence.history[this.deps.persistence.history.length - 1];
+    const activeIdx = this.callStack.length - 1;
+
     return {
+      version: SAVE_FORMAT_VERSION,
       slot,
       label: this.currentLabel,
-      callStack: this.callStack.map((f) => ({
-        label: f.labelName,
-        index: Math.max(0, f.index - 1),
-      })),
+      callStack: this.callStack.map((f, idx) => {
+        // Only rewind the active topmost frame when paused on an interactive
+        // statement (`say`, `menu`, `pause`, etc.); parent frames already point
+        // to the statement immediately following their `call`/`if`/`menu`.
+        const isActiveInteractive =
+          idx === activeIdx && this.activeInteractiveFrame === f;
+        const savedIndex = isActiveInteractive
+          ? Math.max(0, f.index - 1)
+          : f.index;
+        return {
+          label: f.labelName,
+          blockPath: [...f.blockPath],
+          index: savedIndex,
+          localScope: f.scopeMap ? this.py.exportScope(f.scopeMap) : undefined,
+        };
+      }),
       chapter: Number(this.py.getVar("chapter") ?? 0),
       savedAt: new Date().toLocaleString(),
       caption: lastEntry ? lastEntry.what.slice(0, 42) : this.currentLabel,
@@ -132,25 +157,44 @@ export class ScriptVM {
       variables: this.py.exportVars(),
       sceneState: {
         bg: scState.bg,
+        bgAt: scState.bgAt,
         sprites: scState.sprites,
+        layerAt: scState.layerAt,
         music: this.deps.audio.getPlaying("music"),
+        dialogueStyle: uiState.dialogueStyle,
+        quickMenuVisible: uiState.quickMenuVisible,
+        monikaTextbox: uiState.monikaTextbox,
       },
+      history: [...this.deps.persistence.history],
     };
   }
 
   public async restoreFromSaveSlot(slot: SaveSlot): Promise<void> {
+    if (slot.version !== SAVE_FORMAT_VERSION) {
+      await this.deps.modals.showDialog(
+        "This save file is from an incompatible version and cannot be loaded.",
+      );
+      return;
+    }
+
     this.stop();
     this.resetVariables();
+    this.py.clearScopes();
     this.py.importVars(slot.variables);
 
-    if (slot.sceneState.bg) {
-      await this.deps.scene.setScene(slot.sceneState.bg);
+    if (slot.history) {
+      this.deps.persistence.setHistory(slot.history);
     }
-    for (const sp of slot.sceneState.sprites) {
-      await this.deps.scene.show(sp.imageName, sp.at);
-    }
+
+    await this.deps.scene.restoreSnapshot(slot.sceneState);
+    this.deps.dialogue.setDialogueStyle(slot.sceneState.dialogueStyle || "normal");
+    this.deps.dialogue.setQuickMenuVisible(slot.sceneState.quickMenuVisible);
+    this.deps.dialogue.setMonikaTextbox(slot.sceneState.monikaTextbox);
+
     if (slot.sceneState.music) {
       await this.deps.audio.play("music", slot.sceneState.music).catch(() => {});
+    } else {
+      this.deps.audio.stop("music", 0);
     }
 
     const token = ++this.abortToken;
@@ -160,14 +204,23 @@ export class ScriptVM {
 
     for (const savedFrame of slot.callStack) {
       const found = await this.findLabelNode(savedFrame.label);
-      if (found) {
-        this.callStack.push({
-          labelName: savedFrame.label,
-          statements: found.block,
-          index: savedFrame.index,
-          hasScope: false,
-        });
+      if (!found) {
+        continue;
       }
+      const block = resolveBlockPath(found.block, savedFrame.blockPath ?? []);
+      if (!block) {
+        continue;
+      }
+      const scopeMap = savedFrame.localScope
+        ? this.py.pushScope(savedFrame.localScope)
+        : undefined;
+      this.callStack.push({
+        labelName: savedFrame.label,
+        blockPath: [...(savedFrame.blockPath ?? [])],
+        statements: block,
+        index: savedFrame.index,
+        scopeMap,
+      });
     }
 
     if (this.callStack.length === 0) {
@@ -182,6 +235,7 @@ export class ScriptVM {
     const token = ++this.abortToken;
     this.running = true;
     this.currentLabel = labelName;
+    this.py.clearScopes();
 
     // Special case: `poem` label invokes our interactive PoemGameScreen
     if (labelName === "poem") {
@@ -202,9 +256,9 @@ export class ScriptVM {
     this.callStack = [
       {
         labelName,
+        blockPath: [],
         statements: found.block,
         index: 0,
-        hasScope: false,
       },
     ];
 
@@ -215,7 +269,7 @@ export class ScriptVM {
     while (this.running && token === this.abortToken && this.callStack.length > 0) {
       const frame = this.callStack[this.callStack.length - 1];
       if (frame.index >= frame.statements.length) {
-        if (frame.hasScope) {
+        if (frame.scopeMap) {
           this.py.popScope();
         }
         this.callStack.pop();
@@ -226,7 +280,7 @@ export class ScriptVM {
       frame.index += 1;
 
       try {
-        const control = await this.executeStatement(stmt, token);
+        const control = await this.executeStatement(stmt, frame, token);
         if (control === "stop") {
           break;
         }
@@ -241,6 +295,8 @@ export class ScriptVM {
           return;
         }
         throw err;
+      } finally {
+        this.activeInteractiveFrame = null;
       }
     }
 
@@ -253,7 +309,7 @@ export class ScriptVM {
 
   private async performJump(target: string): Promise<void> {
     for (const f of this.callStack) {
-      if (f.hasScope) {
+      if (f.scopeMap) {
         this.py.popScope();
       }
     }
@@ -265,9 +321,9 @@ export class ScriptVM {
       this.deps.persistence.markLabelSeen(target);
       this.callStack.push({
         labelName: target,
+        blockPath: [],
         statements: found.block,
         index: 0,
-        hasScope: false,
       });
     } else {
       console.warn(`[ScriptVM] Jump target not found: ${target}`);
@@ -276,6 +332,7 @@ export class ScriptVM {
 
   private async executeStatement(
     stmt: ScriptStatement,
+    frame: Frame,
     token: number,
   ): Promise<"continue" | "stop"> {
     if (!this.running || token !== this.abortToken) {
@@ -287,9 +344,27 @@ export class ScriptVM {
         const s = stmt as Extract<ScriptStatement, { type: "say" }>;
         const speaker = this.resolveSpeaker(s.who);
         const text = this.interpolateText(s.what);
-        this.deps.persistence.addHistory(speaker, text);
+        const lineKey = `${frame.labelName}:${s.line}:${frame.index - 1}`;
+        const wasSeen = this.deps.persistence.isLineSeen(lineKey);
         const interact = s.interact !== false;
-        await this.deps.dialogue.showLine(speaker, text, interact);
+
+        if (
+          interact &&
+          this.deps.dialogue.isSkipping() &&
+          !wasSeen &&
+          !this.deps.persistence.data.preferences.skipUnseen
+        ) {
+          this.deps.dialogue.setSkipping(false);
+        }
+
+        this.deps.persistence.addHistory(speaker, text);
+        this.activeInteractiveFrame = frame;
+        await this.deps.dialogue.showLine(speaker, text, interact, wasSeen);
+        this.deps.persistence.markLineSeen(lineKey);
+
+        if (s.with) {
+          await this.deps.scene.runTransition(s.with);
+        }
         return "continue";
       }
 
@@ -301,6 +376,7 @@ export class ScriptVM {
             layer: s.layer,
             at: s.imspec.at ?? [],
             paramText: resolved.paramText,
+            atl: s.atl,
           });
         }
         return "continue";
@@ -316,6 +392,7 @@ export class ScriptVM {
             zorder: s.imspec.zorder,
             paramText: resolved.paramText,
             def: resolved.def,
+            atl: s.atl,
           });
         }
         return "continue";
@@ -382,6 +459,7 @@ export class ScriptVM {
           const n = parseFloat(s.duration);
           sec = Number.isNaN(n) ? null : n;
         }
+        this.activeInteractiveFrame = frame;
         await this.handlePause(sec);
         return "continue";
       }
@@ -430,6 +508,7 @@ export class ScriptVM {
           : s.label;
 
         if (target === "poem") {
+          this.activeInteractiveFrame = frame;
           await this.poemGame?.run();
           return "continue";
         }
@@ -459,19 +538,20 @@ export class ScriptVM {
               posIdx += 1;
             }
           }
-          this.py.pushScope(locals);
+          const scopeMap = this.py.pushScope(locals);
           this.callStack.push({
             labelName: target,
+            blockPath: [],
             statements: found.block,
             index: 0,
-            hasScope: true,
+            scopeMap,
           });
         } else {
           this.callStack.push({
             labelName: target,
+            blockPath: [],
             statements: found.block,
             index: 0,
-            hasScope: false,
           });
         }
         return "continue";
@@ -479,7 +559,7 @@ export class ScriptVM {
 
       case "return": {
         const popped = this.callStack.pop();
-        if (popped?.hasScope) {
+        if (popped?.scopeMap) {
           this.py.popScope();
         }
         return "continue";
@@ -490,24 +570,29 @@ export class ScriptVM {
         this.currentLabel = s.name;
         this.deps.persistence.markLabelSeen(s.name);
         this.callStack.push({
-          labelName: s.name,
+          labelName: frame.labelName,
+          blockPath: [
+            ...frame.blockPath,
+            { kind: "label", stmtIndex: frame.index - 1 },
+          ],
           statements: s.block,
           index: 0,
-          hasScope: false,
         });
         return "continue";
       }
 
       case "menu": {
         const s = stmt as Extract<ScriptStatement, { type: "menu" }>;
+        const stmtIndex = frame.index - 1;
         const promptItem = s.items.find((item) => item.block === null && item.caption);
         if (promptItem && promptItem.caption) {
           const text = this.interpolateText(promptItem.caption);
           this.deps.dialogue.showStaticPrompt(null, text);
         }
 
-        const visibleChoices = [];
-        for (const item of s.items) {
+        const visibleChoices: Array<{ itemIndex: number; item: (typeof s.items)[number] }> = [];
+        for (let idx = 0; idx < s.items.length; idx++) {
+          const item = s.items[idx];
           if (item.block === null || !item.caption) {
             continue;
           }
@@ -515,25 +600,29 @@ export class ScriptVM {
             ? this.py.isTruthy(await this.py.evalExpr(item.condAst))
             : true;
           if (ok) {
-            visibleChoices.push(item);
+            visibleChoices.push({ itemIndex: idx, item });
           }
         }
 
         if (visibleChoices.length > 0) {
-          const labels = visibleChoices.map((item) =>
-            this.interpolateText(item.caption ?? ""),
+          const labels = visibleChoices.map((entry) =>
+            this.interpolateText(entry.item.caption ?? ""),
           );
           const isRigged =
             this.deps.persistence.data.playthrough === 2 &&
             labels.some((l) => l.toLowerCase().includes("monika"));
+          this.activeInteractiveFrame = frame;
           const chosenIndex = await this.deps.dialogue.showChoices(labels, isRigged);
           const chosen = visibleChoices[chosenIndex];
-          if (chosen && chosen.block) {
+          if (chosen && chosen.item.block) {
             this.callStack.push({
-              labelName: this.currentLabel,
-              statements: chosen.block,
+              labelName: frame.labelName,
+              blockPath: [
+                ...frame.blockPath,
+                { kind: "menu", stmtIndex, itemIndex: chosen.itemIndex },
+              ],
+              statements: chosen.item.block,
               index: 0,
-              hasScope: false,
             });
           }
         }
@@ -542,16 +631,21 @@ export class ScriptVM {
 
       case "if": {
         const s = stmt as Extract<ScriptStatement, { type: "if" }>;
-        for (const branch of s.branches) {
+        const stmtIndex = frame.index - 1;
+        for (let bi = 0; bi < s.branches.length; bi++) {
+          const branch = s.branches[bi];
           const ok = branch.condAst
             ? this.py.isTruthy(await this.py.evalExpr(branch.condAst))
             : branch.condition === "True";
           if (ok) {
             this.callStack.push({
-              labelName: this.currentLabel,
+              labelName: frame.labelName,
+              blockPath: [
+                ...frame.blockPath,
+                { kind: "if", stmtIndex, branchIndex: bi },
+              ],
               statements: branch.block,
               index: 0,
-              hasScope: false,
             });
             break;
           }
@@ -559,9 +653,28 @@ export class ScriptVM {
         return "continue";
       }
 
+      case "while": {
+        const s = stmt as Extract<ScriptStatement, { type: "while" }>;
+        const stmtIndex = frame.index - 1;
+        const ok = s.condAst
+          ? this.py.isTruthy(await this.py.evalExpr(s.condAst))
+          : false;
+        if (ok) {
+          frame.index = stmtIndex;
+          this.callStack.push({
+            labelName: frame.labelName,
+            blockPath: [...frame.blockPath, { kind: "while", stmtIndex }],
+            statements: s.block,
+            index: 0,
+          });
+        }
+        return "continue";
+      }
+
       case "python": {
         const s = stmt as Extract<ScriptStatement, { type: "python" }>;
         if (s.pyAst && s.pyAst.length > 0) {
+          this.activeInteractiveFrame = frame;
           await this.py.execBlock(s.pyAst);
         }
         return "continue";
@@ -695,14 +808,10 @@ export class ScriptVM {
 
   private async handlePause(seconds?: number | null): Promise<void> {
     if (seconds === undefined || seconds === null) {
-      if (!this.deps.poemView) {
-        await this.deps.dialogue.waitForClick();
+      if (this.deps.poemView.isOpen()) {
+        await this.deps.poemView.waitForDismiss();
       } else {
-        // Wait for either poem dismiss or dialogue click
-        await Promise.race([
-          this.deps.poemView.waitForDismiss(),
-          this.deps.dialogue.waitForClick(),
-        ]);
+        await this.deps.dialogue.waitForClick();
       }
       return;
     }
@@ -804,6 +913,43 @@ export class ScriptVM {
     const script = await this.loadScript(stem);
     return findLabelObjInList(script.statements, labelName);
   }
+}
+
+export function resolveBlockPath(
+  rootBlock: ScriptStatement[],
+  blockPath: BlockPathSegment[],
+): ScriptStatement[] | null {
+  let current: ScriptStatement[] = rootBlock;
+  for (const seg of blockPath) {
+    const stmt = current[seg.stmtIndex];
+    if (!stmt) {
+      return null;
+    }
+    if (seg.kind === "if" && stmt.type === "if") {
+      const ifStmt = stmt as Extract<ScriptStatement, { type: "if" }>;
+      const branch = ifStmt.branches[seg.branchIndex];
+      if (!branch) {
+        return null;
+      }
+      current = branch.block;
+    } else if (seg.kind === "menu" && stmt.type === "menu") {
+      const menuStmt = stmt as Extract<ScriptStatement, { type: "menu" }>;
+      const item = menuStmt.items[seg.itemIndex];
+      if (!item || !item.block) {
+        return null;
+      }
+      current = item.block;
+    } else if (seg.kind === "while" && stmt.type === "while") {
+      const whileStmt = stmt as Extract<ScriptStatement, { type: "while" }>;
+      current = whileStmt.block;
+    } else if (seg.kind === "label" && stmt.type === "label") {
+      const lblStmt = stmt as Extract<ScriptStatement, { type: "label" }>;
+      current = lblStmt.block;
+    } else {
+      return null;
+    }
+  }
+  return current;
 }
 
 function findLabelObjInList(

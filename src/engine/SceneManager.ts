@@ -1,6 +1,12 @@
 import { Container, Graphics, Ticker } from "pixi.js";
-import type { ImageDef, PyExprNode, TransformDef } from "../types/game-data";
+import type {
+  AtlStatement,
+  ImageDef,
+  PyExprNode,
+  TransformDef,
+} from "../types/game-data";
 import type { AssetLoader } from "./AssetLoader";
+import type { SavedSpriteState } from "./Persistence";
 import { ImageDissolveFilter } from "./shaders/ImageDissolveFilter";
 import { InvertEffect, TearEffect } from "./SpecialEffects";
 import { LOGICAL_HEIGHT, LOGICAL_WIDTH, type Stage } from "./Stage";
@@ -9,6 +15,8 @@ interface ShownSprite {
   tag: string;
   imageName: string;
   layerName: string;
+  atTransforms: string[];
+  isTopLeftOverlay: boolean;
   node: Container;
   baseWidth: number;
   baseHeight: number;
@@ -149,7 +157,9 @@ export function easeInBounce(t: number): number {
 export class SceneManager {
   private readonly sprites = new Map<string, ShownSprite>();
   private currentBgName: string | null = null;
+  private currentBgAt: string[] = [];
   private currentBgNode: Container | null = null;
+  private layerAtMap = new Map<string, string[]>();
   private layerCancelFns = new Map<string, () => void>();
   public readonly tear: TearEffect;
   public readonly invert: InvertEffect;
@@ -188,21 +198,145 @@ export class SceneManager {
 
   public getSnapshotState(): {
     bg: string | null;
-    sprites: Array<{ tag: string; imageName: string; at: string[] }>;
+    bgAt: string[];
+    sprites: SavedSpriteState[];
+    layerAt: Record<string, string[]>;
   } {
+    const layerAt: Record<string, string[]> = {};
+    for (const [k, v] of this.layerAtMap.entries()) {
+      layerAt[k] = [...v];
+    }
     return {
       bg: this.currentBgName,
+      bgAt: [...this.currentBgAt],
       sprites: Array.from(this.sprites.values()).map((s) => ({
         tag: s.tag,
         imageName: s.imageName,
-        at: [],
+        layerName: s.layerName,
+        at: [...s.atTransforms],
+        x: s.node.position.x,
+        y: s.node.position.y,
+        xcenter: s.xcenter,
+        ypos: s.ypos,
+        yanchor: s.yanchor,
+        xoffset: s.xoffset,
+        yoffset: s.yoffset,
+        zoom: s.node.scale.x,
+        alpha: s.node.alpha,
+        zorder: s.zorder,
+        isTopLeftOverlay: s.isTopLeftOverlay,
       })),
+      layerAt,
     };
+  }
+
+  public async restoreSnapshot(snapshot: {
+    bg: string | null;
+    bgAt?: string[];
+    sprites: SavedSpriteState[];
+    layerAt?: Record<string, string[]>;
+  }): Promise<void> {
+    this.resetAllLayers();
+    if (snapshot.bg) {
+      await this.setScene(snapshot.bg, { at: snapshot.bgAt ?? [] });
+    }
+    for (const sp of snapshot.sprites) {
+      await this.restoreSprite(sp);
+    }
+    if (snapshot.layerAt) {
+      for (const [layer, at] of Object.entries(snapshot.layerAt)) {
+        this.showLayer(layer, at);
+      }
+    }
+  }
+
+  public resetAllLayers(): void {
+    for (const sp of this.sprites.values()) {
+      sp.cancelAnim?.();
+    }
+    this.sprites.clear();
+    for (const cancel of this.layerCancelFns.values()) {
+      cancel();
+    }
+    this.layerCancelFns.clear();
+    this.layerAtMap.clear();
+    this.currentBgName = null;
+    this.currentBgAt = [];
+    this.currentBgNode = null;
+    this.stage.clearSceneLayers();
+  }
+
+  private async restoreSprite(saved: SavedSpriteState): Promise<void> {
+    const layerContainer = this.getLayerContainer(saved.layerName);
+    const node = await this.assets.buildDisplayable(saved.imageName, {
+      evalAst: this.evalAstFn,
+      ticker: this.stage.app.ticker,
+    });
+    const isCharacter = ["sayori", "natsuki", "yuri", "monika"].includes(
+      saved.tag,
+    );
+    const bounds = node.getLocalBounds();
+    const baseWidth =
+      bounds.width > 0 ? bounds.width : isCharacter ? 960 : LOGICAL_WIDTH;
+    const baseHeight =
+      bounds.height > 0 ? bounds.height : isCharacter ? 960 : LOGICAL_HEIGHT;
+
+    if (saved.isTopLeftOverlay) {
+      node.pivot.set(0, 0);
+      node.position.set(saved.x, saved.y);
+      node.scale.set(saved.zoom);
+    } else {
+      node.pivot.set(baseWidth * 0.5, baseHeight * saved.yanchor);
+      node.position.set(saved.x, saved.y);
+      node.scale.set(saved.zoom);
+    }
+    node.alpha = saved.alpha;
+    node.zIndex = saved.zorder;
+    layerContainer.sortableChildren = true;
+    layerContainer.addChild(node);
+
+    const record: ShownSprite = {
+      tag: saved.tag,
+      imageName: saved.imageName,
+      layerName: saved.layerName,
+      atTransforms: [...saved.at],
+      isTopLeftOverlay: saved.isTopLeftOverlay,
+      node,
+      baseWidth,
+      baseHeight,
+      xcenter: saved.xcenter,
+      yanchor: saved.yanchor,
+      ypos: saved.ypos,
+      xoffset: saved.xoffset,
+      yoffset: saved.yoffset,
+      zoom: saved.zoom,
+      alpha: saved.alpha,
+      zorder: saved.zorder,
+    };
+    this.sprites.set(saved.tag, record);
+
+    // Re-attach continuous looping ATL transforms without replaying one-shot intros
+    const continuous = saved.at.filter((name) => {
+      const base = name.trim().split("(")[0];
+      return (
+        base === "panic" ||
+        base === "n_cg2_wiggle_loop" ||
+        base.startsWith("credits_")
+      );
+    });
+    if (continuous.length > 0) {
+      this.attachSpecialAtl(record, continuous);
+    }
   }
 
   public async setScene(
     imageName: string,
-    options?: { layer?: string; at?: string[]; paramText?: string },
+    options?: {
+      layer?: string;
+      at?: string[];
+      paramText?: string;
+      atl?: AtlStatement[];
+    },
   ): Promise<void> {
     for (const sp of this.sprites.values()) {
       sp.cancelAnim?.();
@@ -213,6 +347,7 @@ export class SceneManager {
     this.stage.layers.background.removeChildren();
 
     this.currentBgName = imageName;
+    this.currentBgAt = [...(options?.at ?? [])];
     const node = await this.assets.buildDisplayable(imageName, {
       evalAst: this.evalAstFn,
       ticker: this.stage.app.ticker,
@@ -223,6 +358,9 @@ export class SceneManager {
 
     if (options?.at && options.at.length > 0) {
       this.applyStaticAtToNode(node, options.at);
+    }
+    if (options?.atl && options.atl.length > 0) {
+      this.applyInlineAtl(node, options.atl);
     }
   }
 
@@ -235,6 +373,7 @@ export class SceneManager {
       zorder?: string;
       paramText?: string;
       def?: ImageDef;
+      atl?: AtlStatement[];
     },
   ): Promise<void> {
     const trimmed = imageNameOrTag.trim();
@@ -455,6 +594,11 @@ export class SceneManager {
       tag,
       imageName: resolvedImageName,
       layerName,
+      atTransforms:
+        atTransforms.length > 0
+          ? [...atTransforms]
+          : [...(existing?.atTransforms ?? [])],
+      isTopLeftOverlay,
       node,
       baseWidth,
       baseHeight,
@@ -468,6 +612,10 @@ export class SceneManager {
       zorder,
     };
     this.sprites.set(tag, record);
+
+    if (options?.atl && options.atl.length > 0) {
+      this.applyInlineAtl(node, options.atl);
+    }
 
     // Run continuous or special ATL animations
     this.attachSpecialAtl(record, atTransforms);
@@ -648,11 +796,42 @@ export class SceneManager {
     }
   }
 
+  private applyInlineAtl(node: Container, steps: AtlStatement[]): void {
+    for (const st of steps) {
+      if (st.type !== "step") {
+        continue;
+      }
+      const step = st as Extract<AtlStatement, { type: "step" }>;
+      for (const [prop, valStr] of step.properties ?? []) {
+        const val = this.evalNumeric(valStr);
+        if (prop === "alpha") {
+          node.alpha = Math.max(0, Math.min(1, val));
+        } else if (prop === "xpos") {
+          node.position.x = val <= 1 && valStr.includes(".") ? val * LOGICAL_WIDTH : val;
+        } else if (prop === "ypos") {
+          node.position.y = val <= 1 && valStr.includes(".") ? val * LOGICAL_HEIGHT : val;
+        } else if (prop === "xoffset") {
+          node.position.x += val;
+        } else if (prop === "yoffset") {
+          node.position.y += val;
+        } else if (prop === "zoom") {
+          node.scale.set(val);
+        }
+      }
+    }
+  }
+
   public showLayer(layerName: string, atTransforms: string[] = []): void {
     const prevCancel = this.layerCancelFns.get(layerName);
     if (prevCancel) {
       prevCancel();
       this.layerCancelFns.delete(layerName);
+    }
+
+    if (atTransforms.length === 0) {
+      this.layerAtMap.delete(layerName);
+    } else {
+      this.layerAtMap.set(layerName, [...atTransforms]);
     }
 
     const container = this.getLayerContainer(layerName);

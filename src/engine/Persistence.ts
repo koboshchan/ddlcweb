@@ -1,6 +1,9 @@
 const PERSISTENT_KEY = "ddlcweb:persistent:v2";
 const SAVES_KEY = "ddlcweb:saves:v2";
 
+export const SAVE_FORMAT_VERSION = 2;
+export const QUICK_SAVE_SLOT = 0;
+
 export interface PersistentPreferences {
   musicVolume: number;
   sfxVolume: number;
@@ -33,6 +36,7 @@ export interface PersistentData {
   clear: boolean[];
   clearall: boolean;
   seenLabels: string[];
+  seenLines: Record<string, true>;
   preferences: PersistentPreferences;
   [key: string]: unknown;
 }
@@ -42,20 +46,60 @@ export interface HistoryEntry {
   what: string;
 }
 
+export type BlockPathSegment =
+  | { kind: "if"; stmtIndex: number; branchIndex: number }
+  | { kind: "menu"; stmtIndex: number; itemIndex: number }
+  | { kind: "while"; stmtIndex: number }
+  | { kind: "label"; stmtIndex: number };
+
+export interface SavedFrame {
+  label: string;
+  blockPath: BlockPathSegment[];
+  index: number;
+  localScope?: Record<string, unknown>;
+}
+
+export interface SavedSpriteState {
+  tag: string;
+  imageName: string;
+  layerName: string;
+  at: string[];
+  x: number;
+  y: number;
+  xcenter: number;
+  ypos: number;
+  yanchor: number;
+  xoffset: number;
+  yoffset: number;
+  zoom: number;
+  alpha: number;
+  zorder: number;
+  isTopLeftOverlay: boolean;
+}
+
+export interface SavedSceneState {
+  bg: string | null;
+  bgAt: string[];
+  sprites: SavedSpriteState[];
+  layerAt: Record<string, string[]>;
+  music: string | null;
+  dialogueStyle: string;
+  quickMenuVisible: boolean;
+  monikaTextbox: boolean;
+}
+
 export interface SaveSlot {
+  version: number;
   slot: number;
   label: string;
-  callStack: Array<{ label: string; index: number; locals?: Record<string, unknown> }>;
+  callStack: SavedFrame[];
   chapter: number;
   savedAt: string;
   caption: string;
   thumbnail: string;
   variables: Record<string, unknown>;
-  sceneState: {
-    bg: string | null;
-    sprites: Array<{ tag: string; imageName: string; at: string[] }>;
-    music: string | null;
-  };
+  sceneState: SavedSceneState;
+  history?: HistoryEntry[];
 }
 
 const DEFAULT_PERSISTENT: PersistentData = {
@@ -81,6 +125,7 @@ const DEFAULT_PERSISTENT: PersistentData = {
   clear: [false, false, false, false, false, false, false, false, false, false],
   clearall: false,
   seenLabels: [],
+  seenLines: {},
   preferences: {
     musicVolume: 0.8,
     sfxVolume: 0.9,
@@ -92,8 +137,8 @@ const DEFAULT_PERSISTENT: PersistentData = {
 };
 
 /**
- * Handles DDLC's `persistent` store, numbered save slots, seen-label tracking,
- * and dialogue history buffer in localStorage.
+ * Handles DDLC's `persistent` store, numbered + quick save slots,
+ * per-line seen tracking, and dialogue history buffer in localStorage.
  */
 export class Persistence {
   public data: PersistentData;
@@ -115,6 +160,7 @@ export class Persistence {
       return {
         ...structuredClone(DEFAULT_PERSISTENT),
         ...parsed,
+        seenLines: parsed.seenLines ?? {},
         preferences: {
           ...DEFAULT_PERSISTENT.preferences,
           ...(parsed.preferences ?? {}),
@@ -131,7 +177,20 @@ export class Persistence {
       return {};
     }
     try {
-      return JSON.parse(raw) as Record<number, SaveSlot>;
+      const parsed = JSON.parse(raw) as Record<string, SaveSlot>;
+      const valid: Record<number, SaveSlot> = {};
+      let droppedLegacy = false;
+      for (const [k, slot] of Object.entries(parsed)) {
+        if (slot && slot.version === SAVE_FORMAT_VERSION) {
+          valid[Number(k)] = slot;
+        } else {
+          droppedLegacy = true;
+        }
+      }
+      if (droppedLegacy) {
+        localStorage.setItem(SAVES_KEY, JSON.stringify(valid));
+      }
+      return valid;
     } catch {
       return {};
     }
@@ -152,11 +211,26 @@ export class Persistence {
     return this.data.seenLabels.includes(label);
   }
 
+  public markLineSeen(lineKey: string): void {
+    if (!this.data.seenLines[lineKey]) {
+      this.data.seenLines[lineKey] = true;
+      this.savePersistent();
+    }
+  }
+
+  public isLineSeen(lineKey: string): boolean {
+    return Boolean(this.data.seenLines[lineKey]);
+  }
+
   public addHistory(who: string | null, what: string): void {
     this.history.push({ who, what });
     if (this.history.length > 50) {
       this.history.shift();
     }
+  }
+
+  public setHistory(entries: HistoryEntry[]): void {
+    this.history = entries.slice(-50);
   }
 
   public writeSlot(slot: SaveSlot): void {
@@ -165,15 +239,23 @@ export class Persistence {
   }
 
   public readSlot(slotIndex: number): SaveSlot | null {
-    return this.saves[slotIndex] ?? null;
+    const slot = this.saves[slotIndex];
+    if (!slot || slot.version !== SAVE_FORMAT_VERSION) {
+      return null;
+    }
+    return slot;
   }
 
   public listSlots(): SaveSlot[] {
-    return Object.values(this.saves).sort((a, b) => a.slot - b.slot);
+    return Object.values(this.saves)
+      .filter((s) => s.slot !== QUICK_SAVE_SLOT && s.version === SAVE_FORMAT_VERSION)
+      .sort((a, b) => a.slot - b.slot);
   }
 
   public hasAnySave(): boolean {
-    return Object.keys(this.saves).length > 0;
+    return Object.values(this.saves).some(
+      (s) => s.version === SAVE_FORMAT_VERSION,
+    );
   }
 
   public clearAllSaves(): void {

@@ -99,6 +99,10 @@ export class PoemViewScreen {
     });
   }
 
+  public isOpen(): boolean {
+    return !this.root.classList.contains("is-hidden");
+  }
+
   public hide(): void {
     this.dismissResolver = null;
     this.root.classList.add("is-hidden");
