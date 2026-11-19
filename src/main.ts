@@ -164,8 +164,8 @@ async function bootstrap(): Promise<void> {
     titleScreen?.hide();
     poemGame?.hide();
     inGame = true;
-    await vm.restoreFromSaveSlot(slot);
     modals.showNotify("Quick Load complete.");
+    void vm.restoreFromSaveSlot(slot);
   };
 
   dialogue = new DialogueOverlay(stage.uiRoot, assets, audio, persistence, {
