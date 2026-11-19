@@ -13,6 +13,7 @@ export class VirtualFilesDrawer {
   public constructor(
     uiRoot: HTMLElement,
     private readonly vfs: VirtualFS,
+    private readonly onOpenChange?: (open: boolean) => void,
   ) {
     this.backdrop = document.createElement("div");
     this.backdrop.className = "ddlc-vfs-backdrop is-hidden";
@@ -75,10 +76,12 @@ export class VirtualFilesDrawer {
   public show(): void {
     this.render();
     this.backdrop.classList.remove("is-hidden");
+    this.onOpenChange?.(true);
   }
 
   public hide(): void {
     this.backdrop.classList.add("is-hidden");
+    this.onOpenChange?.(false);
   }
 
   private render(): void {

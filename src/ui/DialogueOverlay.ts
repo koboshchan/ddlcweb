@@ -7,6 +7,8 @@ export interface DialogueOverlayCallbacks {
   onOpenHistory: () => void;
   onOpenSave: () => void;
   onOpenLoad: () => void;
+  onQuickSave: () => void;
+  onQuickLoad: () => void;
   onOpenSettings: () => void;
   onOpenVirtualFiles: () => void;
   onToggleSkip: (skipping: boolean) => void;
@@ -38,9 +40,12 @@ export class DialogueOverlay {
   private windowsHidden = false;
   private skipping = false;
   private autoForward = false;
+  private currentLineSeen = false;
+  private readonly activeOverlays = new Set<string>();
 
   private keyDownHandler: ((ev: KeyboardEvent) => void) | null = null;
   private keyUpHandler: ((ev: KeyboardEvent) => void) | null = null;
+  private blurHandler: (() => void) | null = null;
 
   public constructor(
     uiRoot: HTMLElement,
@@ -113,6 +118,8 @@ export class DialogueOverlay {
       { label: "Skip", action: () => this.toggleSkip() },
       { label: "Auto", action: () => this.toggleAutoForward() },
       { label: "Save", action: () => this.callbacks.onOpenSave() },
+      { label: "Q.Save", action: () => this.callbacks.onQuickSave() },
+      { label: "Q.Load", action: () => this.callbacks.onQuickLoad() },
       { label: "Load", action: () => this.callbacks.onOpenLoad() },
       { label: "Settings", action: () => this.callbacks.onOpenSettings() },
       { label: "characters/", action: () => this.callbacks.onOpenVirtualFiles() },
@@ -171,12 +178,42 @@ export class DialogueOverlay {
     return this.skipping;
   }
 
+  public isOverlayPaused(): boolean {
+    return this.activeOverlays.size > 0;
+  }
+
+  public setOverlayOpen(id: string, open: boolean): void {
+    if (open) {
+      this.activeOverlays.add(id);
+      if (this.afmTimer !== null) {
+        window.clearTimeout(this.afmTimer);
+        this.afmTimer = null;
+      }
+      this.callbacks.onToggleSkip(false);
+    } else {
+      this.activeOverlays.delete(id);
+      if (this.activeOverlays.size === 0) {
+        this.callbacks.onToggleSkip(this.skipping);
+        if (this.autoForward && !this.isTyping && this.advanceResolver) {
+          this.scheduleAutoForward();
+        }
+      }
+    }
+  }
+
   public setSkipping(active: boolean): void {
+    if (
+      active &&
+      !this.currentLineSeen &&
+      !this.persistence.data.preferences.skipUnseen
+    ) {
+      return;
+    }
     if (this.skipping === active) {
       return;
     }
     this.skipping = active;
-    this.callbacks.onToggleSkip(active);
+    this.callbacks.onToggleSkip(active && this.activeOverlays.size === 0);
     const skipBtn = this.quickMenuEl.querySelector('[data-quick-action="skip"]');
     skipBtn?.classList.toggle("is-active", active);
 
@@ -187,7 +224,20 @@ export class DialogueOverlay {
 
     if (active) {
       this.skipInterval = window.setInterval(() => {
-        if (!this.layerEl.classList.contains("is-hidden") && this.choiceEl.classList.contains("is-hidden")) {
+        if (this.activeOverlays.size > 0) {
+          return;
+        }
+        if (
+          !this.currentLineSeen &&
+          !this.persistence.data.preferences.skipUnseen
+        ) {
+          this.setSkipping(false);
+          return;
+        }
+        if (
+          !this.layerEl.classList.contains("is-hidden") &&
+          this.choiceEl.classList.contains("is-hidden")
+        ) {
           this.handleAdvanceInput();
         }
       }, 45);
@@ -198,21 +248,47 @@ export class DialogueOverlay {
     this.setSkipping(!this.skipping);
   }
 
-  private toggleAutoForward(): void {
-    this.autoForward = !this.autoForward;
+  public setAutoForward(active: boolean): void {
+    this.autoForward = active;
     const autoBtn = this.quickMenuEl.querySelector('[data-quick-action="auto"]');
-    autoBtn?.classList.toggle("is-active", this.autoForward);
-    if (this.autoForward && !this.isTyping && this.advanceResolver) {
+    autoBtn?.classList.toggle("is-active", active);
+    if (
+      active &&
+      this.activeOverlays.size === 0 &&
+      !this.isTyping &&
+      this.advanceResolver
+    ) {
       this.scheduleAutoForward();
-    } else if (!this.autoForward && this.afmTimer !== null) {
+    } else if (!active && this.afmTimer !== null) {
       window.clearTimeout(this.afmTimer);
       this.afmTimer = null;
     }
   }
 
+  private toggleAutoForward(): void {
+    this.setAutoForward(!this.autoForward);
+  }
+
   private bindKeyboard(): void {
     const onKeyDown = (ev: KeyboardEvent): void => {
-      if (this.layerEl.classList.contains("is-hidden")) {
+      if (
+        this.layerEl.classList.contains("is-hidden") ||
+        this.activeOverlays.size > 0
+      ) {
+        return;
+      }
+      if (ev.key === "F5" || (ev.shiftKey && ev.key.toLowerCase() === "s")) {
+        if (this.choiceEl.classList.contains("is-hidden")) {
+          ev.preventDefault();
+          this.callbacks.onQuickSave();
+        }
+        return;
+      }
+      if (ev.key === "F9" || (ev.shiftKey && ev.key.toLowerCase() === "l")) {
+        if (this.choiceEl.classList.contains("is-hidden")) {
+          ev.preventDefault();
+          this.callbacks.onQuickLoad();
+        }
         return;
       }
       if (ev.key === "Control") {
@@ -244,10 +320,16 @@ export class DialogueOverlay {
       }
     };
 
+    const onBlur = (): void => {
+      this.setSkipping(false);
+    };
+
     this.keyDownHandler = onKeyDown;
     this.keyUpHandler = onKeyUp;
+    this.blurHandler = onBlur;
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
   }
 
   public showStaticPrompt(speaker: string | null, rawText: string): void {
@@ -263,9 +345,10 @@ export class DialogueOverlay {
     speaker: string | null,
     rawText: string,
     interact = true,
-    _seen = false,
+    seen = false,
   ): Promise<void> {
     this.clearTimers();
+    this.currentLineSeen = seen;
     this.layerEl.classList.remove("is-hidden");
     this.setQuickMenuVisible(this.quickMenuVisible);
     this.setSpeaker(speaker);
@@ -279,7 +362,13 @@ export class DialogueOverlay {
       return Promise.resolve();
     }
 
-    if (totalChars === 0 || this.skipping) {
+    const canSkipThis =
+      this.skipping && (seen || this.persistence.data.preferences.skipUnseen);
+    if (this.skipping && !canSkipThis) {
+      this.setSkipping(false);
+    }
+
+    if (totalChars === 0 || canSkipThis) {
       this.renderSpansUpTo(this.fullSpans, totalChars);
       this.ctcEl.classList.remove("is-hidden");
       if (parsed.noWait) {
@@ -313,7 +402,7 @@ export class DialogueOverlay {
           this.finishTyping();
           if (parsed.noWait) {
             this.resolveAdvance();
-          } else if (this.autoForward) {
+          } else if (this.autoForward && this.activeOverlays.size === 0) {
             this.scheduleAutoForward();
           }
         }
@@ -324,13 +413,22 @@ export class DialogueOverlay {
   private scheduleAutoForward(): void {
     if (this.afmTimer !== null) {
       window.clearTimeout(this.afmTimer);
+      this.afmTimer = null;
+    }
+    if (this.activeOverlays.size > 0) {
+      return;
     }
     const waitMs = Math.max(
       1000,
       (this.persistence.data.preferences.autoForwardTime || 5) * 1000,
     );
     this.afmTimer = window.setTimeout(() => {
-      if (this.autoForward && !this.isTyping && this.advanceResolver) {
+      if (
+        this.autoForward &&
+        this.activeOverlays.size === 0 &&
+        !this.isTyping &&
+        this.advanceResolver
+      ) {
         this.resolveAdvance();
       }
     }, waitMs);
@@ -473,6 +571,7 @@ export class DialogueOverlay {
   public hide(): void {
     this.clearTimers();
     this.setSkipping(false);
+    this.setAutoForward(false);
     this.isTyping = false;
     this.advanceResolver = null;
     this.layerEl.classList.add("is-hidden");
@@ -489,6 +588,10 @@ export class DialogueOverlay {
     if (this.keyUpHandler) {
       window.removeEventListener("keyup", this.keyUpHandler);
       this.keyUpHandler = null;
+    }
+    if (this.blurHandler) {
+      window.removeEventListener("blur", this.blurHandler);
+      this.blurHandler = null;
     }
     this.layerEl.remove();
     this.choiceEl.remove();

@@ -4,6 +4,7 @@ import type { Persistence } from "../engine/Persistence";
 import { glitchtext, type PyRuntime } from "../engine/PyRuntime";
 import type { SceneManager } from "../engine/SceneManager";
 import type { PoemWordEntry } from "../types/game-data";
+import type { DialogueOverlay } from "./DialogueOverlay";
 import type { ModalScreens } from "./ModalScreens";
 
 interface StickerState {
@@ -48,6 +49,7 @@ export class PoemGameScreen {
     private readonly persistence: Persistence,
     private readonly py: PyRuntime,
     private readonly modals: ModalScreens,
+    private readonly dialogue: DialogueOverlay,
   ) {
     this.root = document.createElement("div");
     this.root.className = "ddlc-poemgame-layer is-hidden";
@@ -77,24 +79,26 @@ export class PoemGameScreen {
     const chapter = Number(this.py.getVar("chapter") ?? 0);
     const ch1Choice = String(this.py.getVar("ch1_choice") ?? "sayori");
 
+    this.dialogue.hide();
     this.py.setVar("quick_menu", false);
 
-    if (pt === 0 && !this.persistence.data.first_poem) {
-      await this.modals.showDialog(
-        "It's time to write a poem!\n\n" +
-          "Pick words you think your favorite club member\n" +
-          "will like. Something good might happen with\n" +
-          "whoever likes your poem the most!",
-      );
-    }
+    try {
+      if (pt === 0 && !this.persistence.data.first_poem) {
+        await this.modals.showDialog(
+          "It's time to write a poem!\n\n" +
+            "Pick words you think your favorite club member\n" +
+            "will like. Something good might happen with\n" +
+            "whoever likes your poem the most!",
+        );
+      }
 
-    await this.audio.play("music", pt === 3 ? "ghostmenu" : "t4").catch(() => {});
-    await this.scene.setScene(pt === 3 ? "bg notebook-glitch" : "bg notebook");
-    await this.scene.runTransition("dissolve_scene_half");
+      await this.audio.play("music", pt === 3 ? "ghostmenu" : "t4").catch(() => {});
+      await this.scene.setScene(pt === 3 ? "bg notebook-glitch" : "bg notebook");
+      await this.scene.runTransition("dissolve_scene_half");
 
-    this.root.classList.remove("is-hidden");
-    this.setupStickers(pt, chapter);
-    this.startStickerLoop();
+      this.root.classList.remove("is-hidden");
+      this.setupStickers(pt, chapter);
+      this.startStickerLoop();
 
     const wordlist = [...this.wordPool];
     let progress = 1;
@@ -246,8 +250,16 @@ export class PoemGameScreen {
       await this.scene.setScene("black");
       await new Promise((r) => window.setTimeout(r, 500));
     }
+    } finally {
+      this.stopStickerLoop();
+      this.root.classList.add("is-hidden");
+      this.py.setVar("quick_menu", true);
+    }
+  }
 
-    this.py.setVar("quick_menu", true);
+  public hide(): void {
+    this.stopStickerLoop();
+    this.root.classList.add("is-hidden");
   }
 
   private setPoemWinner(chapter: number, winner: string): void {

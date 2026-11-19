@@ -11,6 +11,7 @@ export interface GameMenuCallbacks {
   onLoadSaveSlot: (slot: SaveSlot) => Promise<void>;
   onRestartNewGame: () => void;
   onMainMenu: () => void;
+  onOpenChange?: (open: boolean) => void;
 }
 
 /**
@@ -68,12 +69,14 @@ export class GameMenuScreen {
     this.currentTab = tab;
     this.inGame = inGame;
     this.root.classList.remove("is-hidden");
+    this.callbacks.onOpenChange?.(true);
     this.renderNav();
     this.renderTab();
   }
 
   public close(): void {
     this.root.classList.add("is-hidden");
+    this.callbacks.onOpenChange?.(false);
   }
 
   public isOpen(): boolean {

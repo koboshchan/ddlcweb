@@ -15,6 +15,7 @@ export class ModalScreens {
     uiRoot: HTMLElement,
     private readonly assets: AssetLoader,
     private readonly audio: AudioEngine,
+    private readonly onOpenChange?: (open: boolean) => void,
   ) {
     this.layerEl = document.createElement("div");
     this.layerEl.className = "ddlc-modal-layer is-hidden";
@@ -55,6 +56,7 @@ export class ModalScreens {
     return new Promise((resolve) => {
       this.layerEl.innerHTML = "";
       this.layerEl.classList.remove("is-hidden");
+      this.onOpenChange?.(true);
 
       const frame = document.createElement("div");
       frame.className = "ddlc-confirm-frame";
@@ -116,6 +118,7 @@ export class ModalScreens {
     return new Promise((resolve) => {
       this.layerEl.innerHTML = "";
       this.layerEl.classList.remove("is-hidden");
+      this.onOpenChange?.(true);
 
       const frame = document.createElement("div");
       frame.className = "ddlc-confirm-frame";
@@ -148,6 +151,7 @@ export class ModalScreens {
     return new Promise((resolve) => {
       this.layerEl.innerHTML = "";
       this.layerEl.classList.remove("is-hidden");
+      this.onOpenChange?.(true);
 
       if (glitched) {
         const glitchOverlay = document.createElement("div");
@@ -224,5 +228,6 @@ export class ModalScreens {
   private closeModal(): void {
     this.layerEl.classList.add("is-hidden");
     this.layerEl.innerHTML = "";
+    this.onOpenChange?.(false);
   }
 }

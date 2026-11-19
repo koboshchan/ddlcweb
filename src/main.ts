@@ -12,7 +12,7 @@ import {
 } from "./generated";
 import { AssetLoader } from "./engine/AssetLoader";
 import { AudioEngine } from "./engine/AudioEngine";
-import { Persistence } from "./engine/Persistence";
+import { Persistence, QUICK_SAVE_SLOT } from "./engine/Persistence";
 import { SceneManager } from "./engine/SceneManager";
 import { ScriptVM } from "./engine/ScriptVM";
 import { Stage } from "./engine/Stage";
@@ -75,9 +75,15 @@ async function bootstrap(): Promise<void> {
 
   const vfs = new VirtualFS(manifest.characterFiles);
   const scene = new SceneManager(stage, assets, transformDefs);
-  const modals = new ModalScreens(stage.uiRoot, assets, audio);
+
+  let dialogue: DialogueOverlay | null = null;
+  const modals = new ModalScreens(stage.uiRoot, assets, audio, (open) => {
+    dialogue?.setOverlayOpen("modal", open);
+  });
   const poemView = new PoemViewScreen(stage.uiRoot, assets);
-  const vfsDrawer = new VirtualFilesDrawer(stage.uiRoot, vfs);
+  const vfsDrawer = new VirtualFilesDrawer(stage.uiRoot, vfs, (open) => {
+    dialogue?.setOverlayOpen("vfs", open);
+  });
 
   const audioPill = document.createElement("button");
   audioPill.type = "button";
@@ -88,12 +94,14 @@ async function bootstrap(): Promise<void> {
   let vm: ScriptVM | null = null;
   let titleScreen: TitleScreen | null = null;
   let gameMenu: GameMenuScreen | null = null;
+  let poemGame: PoemGameScreen | null = null;
   let inGame = false;
 
   const returnToTitle = (): void => {
     inGame = false;
+    poemGame?.hide();
     vm?.stop();
-    stage.clearSceneLayers();
+    scene.resetAllLayers();
     void titleScreen?.show();
   };
 
@@ -107,17 +115,69 @@ async function bootstrap(): Promise<void> {
       persistence.savePersistent();
     }
     titleScreen?.hide();
-    stage.clearSceneLayers();
+    poemGame?.hide();
+    scene.resetAllLayers();
     vm?.resetVariables();
     inGame = true;
     const entryLabel = label ?? "start";
     void vm?.runFromLabel(entryLabel);
   };
 
-  const dialogue = new DialogueOverlay(stage.uiRoot, assets, audio, persistence, {
+  const handleQuickSave = async (): Promise<void> => {
+    if (!inGame || !vm) {
+      return;
+    }
+    if (persistence.data.playthrough === 3) {
+      await modals.showDialog(
+        "There's no point in saving anymore.\nDon't worry, I'm not going anywhere.",
+      );
+      return;
+    }
+    const snapshot = vm.captureSaveSlot(QUICK_SAVE_SLOT);
+    persistence.writeSlot(snapshot);
+    modals.showNotify("Quick Save complete.");
+  };
+
+  const handleQuickLoad = async (): Promise<void> => {
+    if (!vm) {
+      return;
+    }
+    const slot = persistence.readSlot(QUICK_SAVE_SLOT);
+    if (
+      persistence.data.playthrough === 1 &&
+      !persistence.data.deleted_saves &&
+      slot !== null
+    ) {
+      await modals.showDialog(
+        'File error: "characters/sayori.chr"\n\nThe file is missing or corrupt.',
+      );
+      await modals.showDialog(
+        "The save file is corrupt. Starting a new game.",
+      );
+      void startNewGameFlow("start");
+      return;
+    }
+    if (!slot) {
+      modals.showNotify("No quick save found.");
+      return;
+    }
+    titleScreen?.hide();
+    poemGame?.hide();
+    inGame = true;
+    await vm.restoreFromSaveSlot(slot);
+    modals.showNotify("Quick Load complete.");
+  };
+
+  dialogue = new DialogueOverlay(stage.uiRoot, assets, audio, persistence, {
     onOpenHistory: () => gameMenu?.open("history", true),
     onOpenSave: () => gameMenu?.open("save", true),
     onOpenLoad: () => gameMenu?.open("load", true),
+    onQuickSave: () => {
+      void handleQuickSave();
+    },
+    onQuickLoad: () => {
+      void handleQuickLoad();
+    },
     onOpenSettings: () => gameMenu?.open("settings", true),
     onOpenVirtualFiles: () => vfsDrawer.show(),
     onToggleSkip: (skipping) => modals.setSkipIndicator(skipping),
@@ -143,7 +203,7 @@ async function bootstrap(): Promise<void> {
     },
   });
 
-  const poemGame = new PoemGameScreen(
+  poemGame = new PoemGameScreen(
     stage.uiRoot,
     manifest.poemWords,
     assets,
@@ -152,6 +212,7 @@ async function bootstrap(): Promise<void> {
     persistence,
     vm.py,
     modals,
+    dialogue,
   );
   vm.attachPoemGame(poemGame);
 
@@ -166,6 +227,7 @@ async function bootstrap(): Promise<void> {
       onCaptureSaveData: (slot) => vm!.captureSaveSlot(slot),
       onLoadSaveSlot: async (slot) => {
         titleScreen?.hide();
+        poemGame?.hide();
         inGame = true;
         await vm!.restoreFromSaveSlot(slot);
       },
@@ -173,6 +235,7 @@ async function bootstrap(): Promise<void> {
         void startNewGameFlow("start");
       },
       onMainMenu: returnToTitle,
+      onOpenChange: (open) => dialogue?.setOverlayOpen("gamemenu", open),
     },
   );
 

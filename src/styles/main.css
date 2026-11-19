@@ -247,7 +247,8 @@ body {
   bottom: 15px;
   transform: translateX(-50%);
   display: flex;
-  gap: 16px;
+  gap: 14px;
+  white-space: nowrap;
   z-index: 35;
 }
 
