@@ -3,6 +3,9 @@ node_modules/
 dist/
 dist-ssr/
 *.local
+*.log
+.env
+.env.*
 
 # --- Extracted / Compiled DDLC Game Data ---
 # NOTHING derived from a copy of DDLC may ever be committed to this repo.
@@ -29,6 +32,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+*.egg-info/
 
 # --- Editors & OS ---
 .vscode/
