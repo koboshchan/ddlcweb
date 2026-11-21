@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 from rpyc_ast import flatten, kind, load_rpyc, pycode_source
 
-PIPELINE_VERSION = 2
+PIPELINE_VERSION = 3
 
 _HEX_COLOR_RE = re.compile(
     r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"
@@ -527,6 +527,15 @@ def serialize_atl_block(block: Any) -> list[dict[str, Any]]:
             out.append(
                 {"type": "contains", "expr": str(getattr(stmt, "expression", ""))}
             )
+        elif sk == "RawChild":
+            out.append(
+                {
+                    "type": "child",
+                    "blocks": [
+                        serialize_atl_block(sub) for sub in getattr(stmt, "children", ())
+                    ],
+                }
+            )
         else:
             out.append({"type": sk})
     return out
@@ -687,6 +696,9 @@ def serialize_script_nodes(nodes: list[Any]) -> list[dict[str, Any]]:
                 "what": str(getattr(node, "what", "")),
                 "line": lineno,
             }
+            attrs = getattr(node, "attributes", None)
+            if attrs:
+                entry["attributes"] = [str(a) for a in attrs]
             if getattr(node, "with_", None):
                 entry["with"] = str(node.with_)
             if getattr(node, "interact", True) is False:
@@ -860,14 +872,16 @@ def serialize_script_nodes(nodes: list[Any]) -> list[dict[str, Any]]:
         elif nk == "Pass":
             out.append({"type": "pass", "line": lineno})
         elif nk == "ShowLayer":
-            out.append(
-                {
-                    "type": "showLayer",
-                    "layer": str(getattr(node, "layer", "master")),
-                    "at": [str(a) for a in getattr(node, "at_list", ()) or ()],
-                    "line": lineno,
-                }
-            )
+            sl_entry: dict[str, Any] = {
+                "type": "showLayer",
+                "layer": str(getattr(node, "layer", "master")),
+                "at": [str(a) for a in getattr(node, "at_list", ()) or ()],
+                "line": lineno,
+            }
+            atl = getattr(node, "atl", None)
+            if atl is not None:
+                sl_entry["atl"] = serialize_atl_block(atl)
+            out.append(sl_entry)
         elif nk in ("Image", "Transform", "Screen", "Style", "Translate"):
             continue
         else:

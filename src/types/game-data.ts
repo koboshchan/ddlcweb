@@ -187,6 +187,7 @@ export type AtlStatement =
   | { type: "block"; statements: AtlStatement[] }
   | { type: "function"; expr: string }
   | { type: "contains"; expr: string }
+  | { type: "child"; blocks: AtlStatement[][] }
   | { type: string };
 
 export interface TransformParam {
@@ -254,6 +255,7 @@ export type ScriptStatement =
       type: "say";
       who: string | null;
       what: string;
+      attributes?: string[];
       with?: string;
       interact?: boolean;
       line: number;
@@ -362,7 +364,13 @@ export type ScriptStatement =
       callAst: PyExprNode | null;
       line: number;
     }
-  | { type: "showLayer"; layer: string; at: string[]; line: number }
+  | {
+      type: "showLayer";
+      layer: string;
+      at: string[];
+      atl?: AtlStatement[];
+      line: number;
+    }
   | { type: "pass"; line: number }
   | { type: string; line: number };
 
