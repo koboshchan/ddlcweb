@@ -43,8 +43,7 @@ void main(void) {
   }
 
   float ramp = max(uRamp, 0.001);
-  float threshold = mix(-ramp, 1.0, uProgress);
-  float factor = clamp((threshold - maskVal) / ramp + 1.0, 0.0, 1.0);
+  float factor = clamp((uProgress * (1.0 + ramp) + maskVal - 1.0) / ramp, 0.0, 1.0);
   finalColor = src * factor;
 }
 `;

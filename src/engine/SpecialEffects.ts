@@ -2,6 +2,7 @@ import {
   Container,
   Filter,
   GlProgram,
+  Graphics,
   Rectangle,
   RenderTexture,
   Sprite,
@@ -65,11 +66,11 @@ void main(void) {
   if (uMoving > 0.5) {
     uv1.x = fract(vTextureCoord.x + uMaskOffsetX);
   }
-  float m1 = texture(uMask, uv1).r;
-  float m2 = texture(uMaskB, vTextureCoord).r;
-  float maskVal = min(m1, m2);
-  float ramp = max(uRamp / 255.0, 0.005);
-  float alpha = clamp((uThreshold - maskVal) / ramp + 1.0, 0.0, 1.0);
+  float m1 = texture(uMask, uv1).a;
+  float m2 = texture(uMaskB, vTextureCoord).a;
+  float maskAlpha = clamp(m2 + m1 * (1.0 - m2), 0.0, 1.0);
+  float ramp = max(uRamp / 256.0, 0.004);
+  float alpha = clamp((uThreshold * (1.0 + ramp) + maskAlpha - 1.0) / ramp, 0.0, 1.0);
   finalColor = src * alpha;
 }
 `;
@@ -401,6 +402,113 @@ export function createBloodEmitter(
     };
     ticker.add(onTick);
   });
+
+  return container;
+}
+
+/**
+ * Procedural glitch rectangle cluster matching DDLC's `RectCluster` displayable
+ * (`n_cg1b`, `natsuki mouth`, `n_rects_ghost1..5`).
+ */
+export function createRectCluster(
+  ticker: Ticker,
+  numRects = 12,
+  areaWidth = 30,
+  areaHeight = 30,
+): Container {
+  const container = new Container({ label: "rect-cluster" });
+  const boxes: Graphics[] = [];
+
+  for (let i = 0; i < numRects; i++) {
+    const g = new Graphics();
+    g.rect(0, 0, 1, 1);
+    g.fill({ color: 0x000000, alpha: 1 });
+    container.addChild(g);
+    boxes.push(g);
+  }
+
+  const randomize = (): void => {
+    for (const g of boxes) {
+      g.position.set(
+        (Math.random() - 0.5) * areaWidth * 2,
+        (Math.random() - 0.5) * areaHeight * 2,
+      );
+      g.scale.set(
+        Math.max(1, (Math.random() * areaWidth) / 2),
+        Math.max(1, (Math.random() * areaHeight) / 2),
+      );
+    }
+  };
+  randomize();
+
+  const onTick = (): void => {
+    if (container.destroyed) {
+      ticker.remove(onTick);
+      return;
+    }
+    randomize();
+  };
+  ticker.add(onTick);
+
+  return container;
+}
+
+/**
+ * Procedural timed glitch rectangles matching DDLC's `RectStatic` displayable
+ * (`m_rectstatic`, `m_rectstatic2`, `m_rectstatic3`).
+ */
+export function createRectStatic(
+  ticker: Ticker,
+  numRects = 12,
+  rectWidth = 30,
+  rectHeight = 30,
+  spriteTex?: Texture,
+): Container {
+  const container = new Container({ label: "rect-static" });
+  const items: Array<{ node: Container; nextAt: number }> = [];
+  let elapsed = 0;
+
+  for (let i = 0; i < numRects; i++) {
+    let node: Container;
+    if (spriteTex) {
+      const sp = new Sprite(spriteTex);
+      sp.width = rectWidth;
+      sp.height = rectHeight;
+      node = sp;
+    } else {
+      const g = new Graphics();
+      g.rect(0, 0, rectWidth, rectHeight);
+      g.fill({ color: 0x000000, alpha: 1 });
+      node = g;
+    }
+    node.position.set(
+      Math.floor(Math.random() * 41) * 32,
+      Math.floor(Math.random() * 24) * 32,
+    );
+    container.addChild(node);
+    items.push({
+      node,
+      nextAt: Math.random() * 0.4 + 0.1,
+    });
+  }
+
+  const onTick = (t: Ticker): void => {
+    if (container.destroyed) {
+      ticker.remove(onTick);
+      return;
+    }
+    elapsed += t.deltaMS / 1000;
+    for (const item of items) {
+      if (elapsed >= item.nextAt) {
+        item.node.position.set(
+          Math.floor(Math.random() * 41) * 32,
+          Math.floor(Math.random() * 24) * 32,
+        );
+        item.nextAt = elapsed + Math.random() * 0.4 + 0.1;
+      }
+    }
+  };
+  ticker.add(onTick);
 
   return container;
 }
