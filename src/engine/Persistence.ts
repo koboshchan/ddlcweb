@@ -57,6 +57,7 @@ export interface SavedFrame {
   blockPath: BlockPathSegment[];
   index: number;
   localScope?: Record<string, unknown>;
+  isSubroutineBoundary?: boolean;
 }
 
 export interface SavedSpriteState {
@@ -147,7 +148,22 @@ export class Persistence {
 
   public constructor() {
     this.data = this.loadPersistent();
+    this.ensureSpecialPoems();
     this.saves = this.loadSaves();
+  }
+
+  public ensureSpecialPoems(): void {
+    if (Array.isArray(this.data.special_poems) && this.data.special_poems.length >= 3) {
+      return;
+    }
+    const pool = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    const picked: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const idx = Math.floor(Math.random() * pool.length);
+      picked.push(pool.splice(idx, 1)[0]);
+    }
+    this.data.special_poems = picked;
+    this.savePersistent();
   }
 
   private loadPersistent(): PersistentData {
@@ -267,6 +283,7 @@ export class Persistence {
 
   public resetPersistent(): void {
     this.data = structuredClone(DEFAULT_PERSISTENT);
+    this.ensureSpecialPoems();
     this.savePersistent();
   }
 }

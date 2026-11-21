@@ -26,10 +26,12 @@ import type { PoemViewScreen } from "../ui/PoemViewScreen";
 
 interface Frame {
   labelName: string;
+  activeLabel?: string;
   blockPath: BlockPathSegment[];
   statements: ScriptStatement[];
   index: number;
   scopeMap?: Map<string, unknown>;
+  isSubroutineBoundary?: boolean;
 }
 
 export interface ScriptVMDeps {
@@ -83,7 +85,7 @@ export class ScriptVM {
         hideScreen: (name) => {
           void this.handleScreenAction("hide", name, [], {});
         },
-        displayMenu: (items) => this.handlePythonMenu(items),
+        displayMenu: (items, interact = true) => this.handlePythonMenu(items, interact),
         setDialogueStyle: (styleName) => this.deps.dialogue.setDialogueStyle(styleName),
         setQuickMenu: (visible) => this.deps.dialogue.setQuickMenuVisible(visible),
         runPoemGame: async () => {
@@ -93,6 +95,8 @@ export class ScriptVM {
         },
       },
     );
+
+    this.py.setTransformNames(this.deps.scene.getTransformNames());
 
     this.deps.scene.setEvaluators(
       (ast) => this.py.evalExprSync(ast),
@@ -150,6 +154,7 @@ export class ScriptVM {
           blockPath: [...f.blockPath],
           index: savedIndex,
           localScope: f.scopeMap ? this.py.exportScope(f.scopeMap) : undefined,
+          isSubroutineBoundary: f.isSubroutineBoundary,
         };
       }),
       chapter: Number(this.py.getVar("chapter") ?? 0),
@@ -205,11 +210,19 @@ export class ScriptVM {
     this.callStack = [];
 
     for (const savedFrame of slot.callStack) {
-      const found = await this.findLabelNode(savedFrame.label);
-      if (!found) {
+      let rootBlock: ScriptStatement[] | null = null;
+      if (savedFrame.label.startsWith("__file__:")) {
+        const stem = savedFrame.label.slice("__file__:".length);
+        const script = await this.loadScript(stem);
+        rootBlock = script.statements;
+      } else {
+        const found = await this.findLabelNode(savedFrame.label);
+        rootBlock = found ? found.block : null;
+      }
+      if (!rootBlock) {
         continue;
       }
-      const block = resolveBlockPath(found.block, savedFrame.blockPath ?? []);
+      const block = resolveBlockPath(rootBlock, savedFrame.blockPath ?? []);
       if (!block) {
         continue;
       }
@@ -222,6 +235,7 @@ export class ScriptVM {
         statements: block,
         index: savedFrame.index,
         scopeMap,
+        isSubroutineBoundary: savedFrame.isSubroutineBoundary,
       });
     }
 
@@ -253,22 +267,13 @@ export class ScriptVM {
       return;
     }
 
-    const found = await this.findLabelNode(labelName);
-    if (!found) {
+    this.callStack = [];
+    const entered = await this.pushLabelEntry(labelName);
+    if (!entered) {
       console.error(`[ScriptVM] Label not found: ${labelName}`);
       this.deps.onReturnToTitle();
       return;
     }
-
-    this.deps.persistence.markLabelSeen(labelName);
-    this.callStack = [
-      {
-        labelName,
-        blockPath: [],
-        statements: found.block,
-        index: 0,
-      },
-    ];
 
     await this.runLoop(token);
   }
@@ -281,6 +286,7 @@ export class ScriptVM {
           this.py.popScope();
         }
         this.callStack.pop();
+        this.syncCurrentLabelFromStack();
         continue;
       }
 
@@ -315,6 +321,17 @@ export class ScriptVM {
     }
   }
 
+  private syncCurrentLabelFromStack(): void {
+    for (let i = this.callStack.length - 1; i >= 0; i--) {
+      const candidate =
+        this.callStack[i].activeLabel ?? this.callStack[i].labelName;
+      if (candidate && !candidate.startsWith("__file__:")) {
+        this.currentLabel = candidate;
+        return;
+      }
+    }
+  }
+
   /**
    * Unwinds structural sub-block frames (`if`/`menu`/`while`/nested `label`)
    * plus the enclosing subroutine/root frame (`blockPath.length === 0`), leaving
@@ -326,26 +343,54 @@ export class ScriptVM {
       if (top.scopeMap) {
         this.py.popScope();
       }
-      if (top.blockPath.length === 0) {
+      if (
+        top.isSubroutineBoundary === true ||
+        (top.isSubroutineBoundary === undefined && top.blockPath.length === 0)
+      ) {
         break;
       }
     }
+    this.syncCurrentLabelFromStack();
+  }
+
+  private async pushLabelEntry(
+    target: string,
+    scopeMap?: Map<string, unknown>,
+  ): Promise<boolean> {
+    const chain = await this.findLabelChain(target);
+    if (!chain) {
+      return false;
+    }
+    this.currentLabel = target;
+    this.deps.persistence.markLabelSeen(target);
+
+    for (let i = 0; i < chain.parents.length; i++) {
+      const p = chain.parents[i];
+      this.callStack.push({
+        labelName: p.labelName,
+        blockPath: p.blockPath,
+        statements: p.statements,
+        index: p.nextIndex,
+        isSubroutineBoundary: i === 0,
+      });
+    }
+
+    this.callStack.push({
+      labelName: target,
+      blockPath: [],
+      statements: chain.labelNode.block,
+      index: 0,
+      scopeMap,
+      isSubroutineBoundary: chain.parents.length === 0,
+    });
+    return true;
   }
 
   private async performJump(target: string): Promise<void> {
     this.popCurrentSubroutine();
 
-    const found = await this.findLabelNode(target);
-    if (found) {
-      this.currentLabel = target;
-      this.deps.persistence.markLabelSeen(target);
-      this.callStack.push({
-        labelName: target,
-        blockPath: [],
-        statements: found.block,
-        index: 0,
-      });
-    } else {
+    const entered = await this.pushLabelEntry(target);
+    if (!entered) {
       console.warn(`[ScriptVM] Jump target not found: ${target}`);
     }
   }
@@ -362,6 +407,33 @@ export class ScriptVM {
     switch (stmt.type) {
       case "say": {
         const s = stmt as Extract<ScriptStatement, { type: "say" }>;
+        if (
+          this.deps.persistence.data.playthrough === 3 &&
+          !this.deps.persistence.data.monika_kill &&
+          this.currentLabel.startsWith("ch30_") &&
+          this.currentLabel !== "ch30_end" &&
+          this.currentLabel !== "ch30_end_2" &&
+          this.currentLabel !== "ch30_endb"
+        ) {
+          if (!this.deps.vfs.exists("characters/monika.chr")) {
+            this.deps.persistence.data.tried_skip = true;
+            this.deps.persistence.savePersistent();
+            this.deps.dialogue.hide();
+            await this.handlePause(2.0);
+            await this.performJump("ch30_end");
+            return "continue";
+          }
+          if (
+            this.deps.dialogue.isSkipping() &&
+            /^ch30_(?:loop|\d+)$/.test(this.currentLabel)
+          ) {
+            this.deps.dialogue.setSkipping(false);
+            this.deps.persistence.data.tried_skip = true;
+            this.deps.persistence.savePersistent();
+            await this.performJump("ch30_noskip");
+            return "continue";
+          }
+        }
         if (s.attributes && s.attributes.length > 0 && s.who) {
           const charDef = this.deps.characters[s.who];
           const imageTag = charDef?.kwargs?.image;
@@ -405,6 +477,8 @@ export class ScriptVM {
 
       case "scene": {
         const s = stmt as Extract<ScriptStatement, { type: "scene" }>;
+        this.deps.dialogue.hideChoices();
+        this.deps.dialogue.hide();
         const resolved = this.resolveImspecDisplay(s.imspec);
         if (resolved.name) {
           await this.deps.scene.setScene(resolved.name, {
@@ -467,7 +541,7 @@ export class ScriptVM {
 
       case "play": {
         const s = stmt as Extract<ScriptStatement, { type: "play" }>;
-        await this.handlePlay(s.channel, s.args);
+        await this.handlePlay(s.channel, s.args, token);
         return "continue";
       }
 
@@ -505,7 +579,7 @@ export class ScriptVM {
 
       case "window": {
         const s = stmt as Extract<ScriptStatement, { type: "window" }>;
-        if (s.mode === "hide") {
+        if (s.mode === "hide" || s.mode.startsWith("hide(")) {
           this.deps.dialogue.hide();
         }
         return "continue";
@@ -558,10 +632,8 @@ export class ScriptVM {
           return "continue";
         }
 
-        this.currentLabel = target;
-        this.deps.persistence.markLabelSeen(target);
-
         const paramDefs = found.paramDefs ?? found.params.map((p) => ({ name: p, defaultAst: null }));
+        let scopeMap: Map<string, unknown> | undefined;
         if (paramDefs.length > 0) {
           const locals: Record<string, unknown> = {};
           for (const p of paramDefs) {
@@ -577,22 +649,9 @@ export class ScriptVM {
               posIdx += 1;
             }
           }
-          const scopeMap = this.py.pushScope(locals);
-          this.callStack.push({
-            labelName: target,
-            blockPath: [],
-            statements: found.block,
-            index: 0,
-            scopeMap,
-          });
-        } else {
-          this.callStack.push({
-            labelName: target,
-            blockPath: [],
-            statements: found.block,
-            index: 0,
-          });
+          scopeMap = this.py.pushScope(locals);
         }
+        await this.pushLabelEntry(target, scopeMap);
         return "continue";
       }
 
@@ -607,6 +666,7 @@ export class ScriptVM {
         this.deps.persistence.markLabelSeen(s.name);
         this.callStack.push({
           labelName: frame.labelName,
+          activeLabel: s.name,
           blockPath: [
             ...frame.blockPath,
             { kind: "label", stmtIndex: frame.index - 1 },
@@ -804,7 +864,11 @@ export class ScriptVM {
       if (action === "hide") {
         this.deps.scene.invert.hide();
       } else {
-        this.deps.scene.invert.show(Number(args[0] ?? 0), Number(args[1] ?? 0));
+        this.deps.scene.invert.show(
+          Number(args[0] ?? 0.15),
+          Number(args[1] ?? 0),
+          this.deps.audio,
+        );
       }
       return null;
     }
@@ -836,10 +900,16 @@ export class ScriptVM {
 
   private async handlePythonMenu(
     items: Array<[string, unknown]>,
+    interact = true,
   ): Promise<unknown> {
-    const labels = items.map(([cap]) => this.interpolateText(String(cap)));
+    const safeItems = Array.isArray(items) ? items : [];
+    const labels = safeItems.map(([cap]) => this.interpolateText(String(cap)));
+    if (!interact) {
+      this.deps.dialogue.showPassiveChoices(labels);
+      return null;
+    }
     const idx = await this.deps.dialogue.showChoices(labels, false);
-    return items[idx]?.[1] ?? null;
+    return safeItems[idx]?.[1] ?? null;
   }
 
   private async handlePause(seconds?: number | null): Promise<void> {
@@ -865,37 +935,159 @@ export class ScriptVM {
     return "music";
   }
 
-  private extractFirstTrackToken(args: string): string {
-    const tokens = args.trim().split(/\s+/);
-    for (const tok of tokens) {
-      if (tok === "fadein" || tok === "fadeout" || tok === "noloop" || tok === "loop") {
-        continue;
-      }
-      const cleaned = tok.replace(/^["']|["']$/g, "");
-      if (cleaned) {
-        return cleaned;
-      }
+  private evaluateAudioPiece(piece: string): string {
+    const p = piece.trim();
+    if (!p) {
+      return "";
     }
-    return "";
+    const q = /^["']([\s\S]*)["']$/.exec(p);
+    if (q) {
+      return q[1];
+    }
+    const strCall = /^str\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)$/.exec(p);
+    const varName = strCall ? strCall[1] : (/^[A-Za-z_][A-Za-z0-9_]*$/.test(p) ? p : null);
+    if (varName) {
+      const val = this.py.getVar(varName);
+      if (val !== undefined && val !== null) {
+        return String(val);
+      }
+      return varName === "currentpos" ? "0" : "";
+    }
+    return p;
   }
 
-  private async handlePlay(channel: string, args: string): Promise<void> {
+  private evaluateAudioExpr(expr: string): string {
+    const trimmed = expr.trim();
+    const parts: string[] = [];
+    let current = "";
+    let quote: string | null = null;
+    for (let i = 0; i < trimmed.length; i++) {
+      const ch = trimmed[i];
+      if (quote) {
+        current += ch;
+        if (ch === quote && trimmed[i - 1] !== "\\") {
+          quote = null;
+        }
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+        current += ch;
+      } else if (ch === "+") {
+        parts.push(current);
+        current = "";
+      } else {
+        current += ch;
+      }
+    }
+    parts.push(current);
+
+    if (parts.length > 1) {
+      return parts.map((p) => this.evaluateAudioPiece(p)).join("");
+    }
+    const q = /^["']([\s\S]*)["']$/.exec(trimmed);
+    return q ? q[1] : trimmed.replace(/^["']|["']$/g, "");
+  }
+
+  private parsePlaySpec(args: string): { tracks: string[]; silenceSec: number } {
+    const trimmed = args.trim();
+    // Split off trailing Ren'Py modifiers (fadein/fadeout/loop/noloop) outside quotes and brackets.
+    let head = trimmed;
+    let quote: string | null = null;
+    let bracketDepth = 0;
+    for (let i = 0; i < trimmed.length; i++) {
+      const ch = trimmed[i];
+      if (quote) {
+        if (ch === quote && trimmed[i - 1] !== "\\") {
+          quote = null;
+        }
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === "[") {
+        bracketDepth += 1;
+      } else if (ch === "]" && bracketDepth > 0) {
+        bracketDepth -= 1;
+      } else if (bracketDepth === 0 && /\s/.test(ch)) {
+        const rest = trimmed.slice(i).trimStart();
+        if (/^(?:fadein|fadeout|noloop|loop)\b/.test(rest)) {
+          head = trimmed.slice(0, i).trim();
+          break;
+        }
+      }
+    }
+
+    const tracks: string[] = [];
+    let silenceSec = 0;
+    if (head.startsWith("[") && head.endsWith("]")) {
+      const inner = head.slice(1, -1);
+      const itemRegex = /"([^"]*)"|'([^']*)'/g;
+      let match: RegExpExecArray | null;
+      while ((match = itemRegex.exec(inner)) !== null) {
+        const val = (match[1] ?? match[2] ?? "").trim();
+        const silenceMatch = /^<silence\s+([0-9]+(?:\.[0-9]+)?)\s*>$/i.exec(val);
+        if (silenceMatch) {
+          silenceSec += parseFloat(silenceMatch[1]);
+        } else if (val) {
+          tracks.push(val);
+        }
+      }
+      return { tracks, silenceSec };
+    }
+
+    const resolved = this.evaluateAudioExpr(head).trim();
+    if (resolved) {
+      tracks.push(resolved);
+    }
+    return { tracks, silenceSec };
+  }
+
+  private extractFirstTrackToken(args: string): string {
+    return this.parsePlaySpec(args).tracks[0] ?? "";
+  }
+
+  private async playTracks(
+    channel: AudioChannelName,
+    tracks: string[],
+    fadein: number,
+    noloop: boolean,
+  ): Promise<void> {
+    try {
+      await this.deps.audio.play(channel, tracks[0], {
+        fadein,
+        loop: noloop ? false : undefined,
+      });
+      for (const nextTrack of tracks.slice(1)) {
+        this.deps.audio.queueTrack(channel, nextTrack);
+      }
+    } catch (err) {
+      console.warn(`[ScriptVM] Audio play skipped for "${tracks[0]}":`, err);
+    }
+  }
+
+  private async handlePlay(channel: string, args: string, token?: number): Promise<void> {
     const trimmed = args.trim();
     const fadeMatch = /fadein\s+([0-9]+(?:\.[0-9]+)?)/.exec(trimmed);
     const fadein = fadeMatch ? parseFloat(fadeMatch[1]) : 0;
     const noloop = /\bnoloop\b/.test(trimmed);
-    const track = this.extractFirstTrackToken(trimmed);
-    if (!track) {
+    const { tracks, silenceSec } = this.parsePlaySpec(trimmed);
+    if (tracks.length === 0) {
       return;
     }
-    try {
-      await this.deps.audio.play(this.mapChannel(channel), track, {
-        fadein,
-        loop: noloop ? false : undefined,
-      });
-    } catch (err) {
-      console.warn(`[ScriptVM] Audio play skipped for "${track}":`, err);
+    const mappedChannel = this.mapChannel(channel);
+    if (silenceSec > 0) {
+      this.deps.audio.stop(mappedChannel, 0);
+      const delayMs = this.deps.dialogue.isSkipping()
+        ? Math.min(silenceSec * 1000, 60)
+        : silenceSec * 1000;
+      window.setTimeout(() => {
+        if (token !== undefined && (!this.running || token !== this.abortToken)) {
+          return;
+        }
+        void this.playTracks(mappedChannel, tracks, fadein, noloop);
+      }, delayMs);
+      return;
     }
+    await this.playTracks(mappedChannel, tracks, fadein, noloop);
   }
 
   private resolveSpeaker(who: string | null): string | null {
@@ -948,6 +1140,28 @@ export class ScriptVM {
     }
     const script = await this.loadScript(stem);
     return findLabelObjInList(script.statements, labelName);
+  }
+
+  private async findLabelChain(labelName: string): Promise<{
+    labelNode: Extract<ScriptStatement, { type: "label" }>;
+    parents: Array<{
+      labelName: string;
+      blockPath: BlockPathSegment[];
+      statements: ScriptStatement[];
+      nextIndex: number;
+    }>;
+  } | null> {
+    const stem = this.deps.scriptIndex.labels[labelName];
+    if (!stem) {
+      return null;
+    }
+    const script = await this.loadScript(stem);
+    return findLabelChainInList(
+      script.statements,
+      labelName,
+      `__file__:${stem}`,
+      [],
+    );
   }
 }
 
@@ -1017,6 +1231,113 @@ function findLabelObjInList(
           const nested = findLabelObjInList(item.block, labelName);
           if (nested) {
             return nested;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function findLabelChainInList(
+  statements: ScriptStatement[],
+  labelName: string,
+  ownerLabel: string,
+  ownerPath: BlockPathSegment[],
+): {
+  labelNode: Extract<ScriptStatement, { type: "label" }>;
+  parents: Array<{
+    labelName: string;
+    blockPath: BlockPathSegment[];
+    statements: ScriptStatement[];
+    nextIndex: number;
+  }>;
+} | null {
+  for (let i = 0; i < statements.length; i++) {
+    const stmt = statements[i];
+    if (stmt.type === "label") {
+      const lbl = stmt as Extract<ScriptStatement, { type: "label" }>;
+      if (lbl.name === labelName) {
+        return {
+          labelNode: lbl,
+          parents: [
+            {
+              labelName: ownerLabel,
+              blockPath: ownerPath,
+              statements,
+              nextIndex: i + 1,
+            },
+          ],
+        };
+      }
+      const nested = findLabelChainInList(
+        lbl.block,
+        labelName,
+        ownerLabel,
+        [...ownerPath, { kind: "label", stmtIndex: i }],
+      );
+      if (nested) {
+        return {
+          labelNode: nested.labelNode,
+          parents: [
+            {
+              labelName: ownerLabel,
+              blockPath: ownerPath,
+              statements,
+              nextIndex: i + 1,
+            },
+            ...nested.parents,
+          ],
+        };
+      }
+    } else if (stmt.type === "if") {
+      const ifStmt = stmt as Extract<ScriptStatement, { type: "if" }>;
+      for (let bi = 0; bi < ifStmt.branches.length; bi++) {
+        const nested = findLabelChainInList(
+          ifStmt.branches[bi].block,
+          labelName,
+          ownerLabel,
+          [...ownerPath, { kind: "if", stmtIndex: i, branchIndex: bi }],
+        );
+        if (nested) {
+          return {
+            labelNode: nested.labelNode,
+            parents: [
+              {
+                labelName: ownerLabel,
+                blockPath: ownerPath,
+                statements,
+                nextIndex: i + 1,
+              },
+              ...nested.parents,
+            ],
+          };
+        }
+      }
+    } else if (stmt.type === "menu") {
+      const menuStmt = stmt as Extract<ScriptStatement, { type: "menu" }>;
+      for (let ii = 0; ii < menuStmt.items.length; ii++) {
+        const item = menuStmt.items[ii];
+        if (item.block) {
+          const nested = findLabelChainInList(
+            item.block,
+            labelName,
+            ownerLabel,
+            [...ownerPath, { kind: "menu", stmtIndex: i, itemIndex: ii }],
+          );
+          if (nested) {
+            return {
+              labelNode: nested.labelNode,
+              parents: [
+                {
+                  labelName: ownerLabel,
+                  blockPath: ownerPath,
+                  statements,
+                  nextIndex: i + 1,
+                },
+                ...nested.parents,
+              ],
+            };
           }
         }
       }

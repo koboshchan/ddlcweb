@@ -84,6 +84,10 @@ export class SceneManager {
     );
   }
 
+  public getTransformNames(): string[] {
+    return Object.keys(this.transformDefs);
+  }
+
   public hasSprite(tag: string): boolean {
     const sp = this.sprites.get(tag);
     return Boolean(sp && !sp.hiding);
@@ -414,7 +418,10 @@ export class SceneManager {
       !this.assets.resolveGamePath(trimmed) &&
       existing !== undefined;
 
-    const isHideTransform = atTransforms.some((raw) => {
+    const safeAtTransforms = (atTransforms ?? []).filter(
+      (raw): raw is string => typeof raw === "string" && raw.trim().length > 0,
+    );
+    const isHideTransform = safeAtTransforms.some((raw) => {
       const base = raw.trim().split("(")[0];
       return base === "thide" || base === "lhide";
     });
@@ -433,6 +440,21 @@ export class SceneManager {
         this.getLayerContainer(existing.layerName).removeChild(node);
         layerContainer.addChild(node);
       }
+    } else if (
+      !options?.def &&
+      !options?.paramText &&
+      !this.assets.hasImageDef(trimmed) &&
+      !this.assets.resolveGamePath(trimmed) &&
+      options?.atl &&
+      options.atl.length > 0
+    ) {
+      node = new Container({ label: `atl-shell:${trimmed}` });
+      if (existing) {
+        existing.runner.stop();
+        this.getLayerContainer(existing.layerName).removeChild(existing.node);
+        existing.node.destroy({ children: true });
+      }
+      layerContainer.addChild(node);
     } else {
       if (options?.def) {
         node = await this.assets.buildFromDef(
@@ -467,7 +489,7 @@ export class SceneManager {
       bounds.height > 0 ? bounds.height : isCharacter ? 960 : LOGICAL_HEIGHT;
 
     const hasExplicitTransform =
-      atTransforms.length > 0 || Boolean(options?.atl && options.atl.length > 0);
+      safeAtTransforms.length > 0 || Boolean(options?.atl && options.atl.length > 0);
     const isTopLeftOverlay =
       !isCharacter &&
       !hasExplicitTransform &&
@@ -514,8 +536,8 @@ export class SceneManager {
       imageName: resolvedImageName,
       layerName,
       atTransforms:
-        atTransforms.length > 0
-          ? [...atTransforms]
+        safeAtTransforms.length > 0
+          ? [...safeAtTransforms]
           : [...(existing?.atTransforms ?? [])],
       isTopLeftOverlay,
       node,
@@ -528,7 +550,7 @@ export class SceneManager {
     this.sprites.set(tag, record);
 
     const steps: AtlStatement[] = [
-      ...this.atNamesToSteps(atTransforms),
+      ...this.atNamesToSteps(safeAtTransforms),
       ...(options?.atl ?? []),
     ];
     const eventName: AtlEventName = isHideTransform

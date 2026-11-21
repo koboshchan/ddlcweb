@@ -2,7 +2,7 @@ import { Container, Rectangle, Sprite, Texture, Ticker } from "pixi.js";
 import type { AtlStatement, TransformDef } from "../types/game-data";
 import type { AssetLoader } from "./AssetLoader";
 import { ImageDissolveFilter } from "./shaders/ImageDissolveFilter";
-import { createRectCluster, createRectStatic } from "./SpecialEffects";
+import { createBloodEmitter, createRectCluster, createRectStatic } from "./SpecialEffects";
 import { LOGICAL_HEIGHT, LOGICAL_WIDTH } from "./Stage";
 import { getWarper, type WarperFn } from "./warpers";
 
@@ -502,6 +502,79 @@ export class AtlRunner {
       return;
     }
 
+    // Handle Solid("#hex"), Blood(...), and AnimatedMask(...) inline ATL expressions
+    const solidM = /^Solid\(["']([^"']+)["']\)/.exec(trimmed);
+    if (solidM) {
+      const hex = solidM[1].startsWith("#") ? solidM[1] : `#${solidM[1]}`;
+      void this.ctx.assets
+        .buildFromDef({ kind: "color", hex }, { ticker: this.ctx.ticker }, trimmed)
+        .then((built) => {
+          if (this.disposed || this.node.destroyed) return;
+          this.swapWithTransition(built, trimmed, withExpr, parentThreadRef);
+        });
+      return;
+    }
+
+    const bloodM = /^Blood\(([^)]+)\)/.exec(trimmed);
+    if (bloodM) {
+      const args = splitArgs(bloodM[1]);
+      let dripChance = 0.05;
+      let burstSize = 100;
+      let numSquirts = 4;
+      for (const a of args.slice(1)) {
+        const kv = /^([a-zA-Z_]+)\s*=\s*(.+)$/.exec(a);
+        if (!kv) continue;
+        const val = parseFloat(kv[2]);
+        if (!Number.isFinite(val)) continue;
+        if (kv[1] === "dripChance") dripChance = val;
+        else if (kv[1] === "burstSize") burstSize = val;
+        else if (kv[1] === "numSquirts") numSquirts = val;
+      }
+      const built = createBloodEmitter(this.ctx.assets, this.ctx.ticker, {
+        dripChance,
+        burstSize,
+        numSquirts,
+      });
+      this.setChildContent(built, trimmed);
+      return;
+    }
+
+    const maskM = /^AnimatedMask\((.+)\)$/.exec(trimmed);
+    if (maskM) {
+      const args = splitArgs(maskM[1]);
+      const unq = (s: string | undefined) => (s ?? "").trim().replace(/^["']|["']$/g, "");
+      const getNum = (key: string, idx: number, def: number): number => {
+        const kw = args.find((a) => a.startsWith(`${key}=`));
+        if (kw) return parseFloat(kw.slice(key.length + 1)) || def;
+        if (args[idx] && !args[idx].includes("=")) return parseFloat(args[idx]) || def;
+        return def;
+      };
+      const movingArg = args.find((a) => a.startsWith("moving="));
+      const moving = movingArg ? movingArg.includes("True") : false;
+      void this.ctx.assets
+        .buildFromDef(
+          {
+            kind: "animatedMask",
+            child: { kind: "file", path: unq(args[0]) },
+            mask: unq(args[1]),
+            maskb: unq(args[2]),
+            oc: getNum("oc", 3, 0.15),
+            op: getNum("op", 4, 16),
+            moving,
+            speed: getNum("speed", 6, 10),
+            frequency: getNum("frequency", 7, 0.25),
+            amount: getNum("amount", 8, 0.1),
+          },
+          { ticker: this.ctx.ticker },
+          trimmed,
+        )
+        .then((built) => {
+          if (this.disposed || this.node.destroyed) return;
+          this.swapWithTransition(built, trimmed, withExpr, parentThreadRef);
+        });
+      return;
+    }
+
     const cleanName = trimmed.replace(/^["']|["']$/g, "");
     if (!cleanName) {
       return;
@@ -713,10 +786,10 @@ export class AtlRunner {
     };
 
     const startStep = (stmt: Extract<AtlStatement, { type: "step" }>): void => {
-      const duration = stmt.duration ? Math.max(0, evalNum(stmt.duration)) : 0;
+      let duration = stmt.duration ? Math.max(0, evalNum(stmt.duration)) : 0;
       const warper = getWarper(stmt.warper);
 
-      // Run step expressions (positional keywords, image changes, nested transform calls)
+      // Run step expressions (positional keywords, numeric pauses, image changes, nested transform calls)
       for (const ex of stmt.expressions ?? []) {
         const e = ex.expr.trim();
         if (e === "truecenter" || e === "center") {
@@ -739,6 +812,21 @@ export class AtlRunner {
           this.state.xanchorRel = false;
           this.state.yanchor = 0;
           this.state.yanchorRel = false;
+          continue;
+        }
+
+        // Bare numeric or local-arithmetic pause (e.g. `0.20`, `6.0`, `t`, `t + 2.030`)
+        const isPauseExpr =
+          !e.startsWith('"') &&
+          !e.startsWith("'") &&
+          !this.ctx.assets.hasImageDef(e) &&
+          (/^[0-9]+(?:\.[0-9]+)?$/.test(e) ||
+            e in locals ||
+            (/^[0-9a-zA-Z_.\s+\-*/()]+$/.test(e) &&
+              /[+\-*/]/.test(e) &&
+              !e.includes("(")));
+        if (isPauseExpr) {
+          duration = Math.max(duration, Math.max(0, evalNum(e)));
           continue;
         }
 

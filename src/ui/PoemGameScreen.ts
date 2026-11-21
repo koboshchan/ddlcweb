@@ -82,6 +82,7 @@ export class PoemGameScreen {
     const chapter = Number(this.py.getVar("chapter") ?? 0);
     const ch1Choice = String(this.py.getVar("ch1_choice") ?? "sayori");
 
+    this.dialogue.setSkipping(false);
     this.dialogue.hide();
     this.py.setVar("quick_menu", false);
 

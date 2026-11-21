@@ -12,6 +12,7 @@ import {
   TilingSprite,
 } from "pixi.js";
 import type {
+  AtlStatement,
   GameManifest,
   ImageDef,
   PyExprNode,
@@ -35,6 +36,7 @@ export interface DisplayableBuildContext {
  */
 export class AssetLoader {
   private readonly fileSet: Set<string>;
+  private readonly lowerFileMap = new Map<string, string>();
   private readonly imageDefs: Record<string, ImageDef>;
   private readonly textureCache = new Map<string, Texture>();
   private fontsLoaded = false;
@@ -46,6 +48,9 @@ export class AssetLoader {
     imageDefs: Record<string, ImageDef>,
   ) {
     this.fileSet = new Set(manifest.gameFiles);
+    for (const f of manifest.gameFiles) {
+      this.lowerFileMap.set(f.toLowerCase(), f);
+    }
     this.imageDefs = imageDefs;
   }
 
@@ -65,6 +70,14 @@ export class AssetLoader {
     const underImages = `images/${cleaned}`;
     if (this.fileSet.has(underImages)) {
       return underImages;
+    }
+    const ci = this.lowerFileMap.get(cleaned.toLowerCase());
+    if (ci) {
+      return ci;
+    }
+    const ciImages = this.lowerFileMap.get(underImages.toLowerCase());
+    if (ciImages) {
+      return ciImages;
     }
     return null;
   }
@@ -155,6 +168,10 @@ export class AssetLoader {
       });
     }
 
+    if (/^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(nameOrPath)) {
+      return this.buildFromDef({ kind: "color", hex: nameOrPath }, ctx, nameOrPath);
+    }
+
     const def = this.imageDefs[nameOrPath];
     if (def) {
       return this.buildFromDef(def, ctx, nameOrPath);
@@ -189,6 +206,9 @@ export class AssetLoader {
       }
 
       case "file": {
+        if (!this.resolveGamePath(def.path) && this.imageDefs[def.path]) {
+          return this.buildFromDef(this.imageDefs[def.path], ctx, def.path);
+        }
         const texture = await this.loadTexture(def.path);
         const container = new Container();
         container.addChild(new Sprite(texture));
@@ -285,25 +305,81 @@ export class AssetLoader {
       }
 
       case "conditionSwitch": {
-        for (const br of def.branches) {
-          const matched = ctx.evalAst
-            ? Boolean(ctx.evalAst(br.condAst))
-            : br.condition === "True";
-          if (matched) {
-            return this.buildFromDef(br.image, ctx);
+        const findMatchIdx = (): number => {
+          for (let i = 0; i < def.branches.length; i++) {
+            const br = def.branches[i];
+            const matched = ctx.evalAst
+              ? Boolean(ctx.evalAst(br.condAst))
+              : br.condition === "True";
+            if (matched) {
+              return i;
+            }
           }
+          return -1;
+        };
+
+        const container = new Container({
+          label: `cond-switch:${nameHint || "anon"}`,
+        });
+        let activeIdx = findMatchIdx();
+        if (activeIdx >= 0) {
+          const initialChild = await this.buildFromDef(
+            def.branches[activeIdx].image,
+            ctx,
+          );
+          container.addChild(initialChild);
         }
-        return new Container();
+
+        if (ctx.ticker && ctx.evalAst && def.branches.length > 1) {
+          let switching = false;
+          const onTick = (): void => {
+            if (container.destroyed) {
+              ctx.ticker?.remove(onTick);
+              return;
+            }
+            if (switching) {
+              return;
+            }
+            const nextIdx = findMatchIdx();
+            if (nextIdx >= 0 && nextIdx !== activeIdx) {
+              switching = true;
+              void this.buildFromDef(def.branches[nextIdx].image, ctx)
+                .then((nextNode) => {
+                  if (container.destroyed) {
+                    nextNode.destroy({ children: true });
+                    return;
+                  }
+                  for (const old of container.removeChildren()) {
+                    old.destroy({ children: true });
+                  }
+                  container.addChild(nextNode);
+                  activeIdx = nextIdx;
+                })
+                .finally(() => {
+                  switching = false;
+                });
+            }
+          };
+          ctx.ticker.add(onTick);
+        }
+
+        return container;
       }
 
       case "animatedMask": {
         const child = await this.buildFromDef(def.child, ctx);
-        const maskImgDef = this.imageDefs[def.mask];
-        const maskBImgDef = this.imageDefs[def.maskb];
-        const maskPath =
-          maskImgDef?.kind === "file" ? maskImgDef.path : def.mask;
-        const maskBPath =
-          maskBImgDef?.kind === "file" ? maskBImgDef.path : def.maskb;
+        const resolveMaskPath = (tag: string): string => {
+          const imgDef = this.imageDefs[tag];
+          if (imgDef?.kind === "file") {
+            return imgDef.path;
+          }
+          if (imgDef?.kind === "atl" && imgDef.preview?.kind === "file") {
+            return imgDef.preview.path;
+          }
+          return tag;
+        };
+        const maskPath = resolveMaskPath(def.mask);
+        const maskBPath = resolveMaskPath(def.maskb);
 
         const [maskTex, maskBTex] = await Promise.all([
           this.loadTexture(maskPath),
@@ -340,15 +416,23 @@ export class AssetLoader {
       }
 
       case "atl": {
-        const container = new Container({ label: `atl:${nameHint || "anon"}` });
+        const outer = new Container({ label: `atl:${nameHint || "anon"}` });
+        const inner = new Container({ label: `atl-inner:${nameHint || "anon"}` });
+        outer.addChild(inner);
         if (def.preview) {
           const previewNode = await this.buildFromDef(def.preview, ctx);
-          container.addChild(previewNode);
+          inner.addChild(previewNode);
+        }
+        const initialSize = extractInitialAtlSize(def.steps);
+        const rawBounds = inner.getLocalBounds();
+        const baseW = rawBounds.width > 0 ? rawBounds.width : LOGICAL_WIDTH;
+        const baseH = rawBounds.height > 0 ? rawBounds.height : LOGICAL_HEIGHT;
+        if (initialSize && rawBounds.width > 0 && rawBounds.height > 0) {
+          inner.scale.set(initialSize[0] / baseW, initialSize[1] / baseH);
         }
         if (ctx.ticker && def.steps.length > 0) {
-          const bounds = container.getLocalBounds();
           const runner = new AtlRunner(
-            container,
+            inner,
             {
               assets: this,
               ticker: ctx.ticker,
@@ -356,15 +440,15 @@ export class AssetLoader {
               evalExpr: (expr, locals) =>
                 evaluateAtlNumber(expr, locals, this.evalExprFn),
             },
-            undefined,
+            initialSize ? { size: initialSize } : undefined,
             {
-              width: bounds.width > 0 ? bounds.width : LOGICAL_WIDTH,
-              height: bounds.height > 0 ? bounds.height : LOGICAL_HEIGHT,
+              width: baseW,
+              height: baseH,
             },
           );
           runner.start(def.steps, "show");
         }
-        return container;
+        return outer;
       }
 
       default: {
@@ -450,13 +534,42 @@ export class AssetLoader {
     });
 
     const txt = new Text({ text: textValue, style });
-    if (align === "center") {
+    if (
+      align === "center" &&
+      nameHint !== "credits_header" &&
+      nameHint !== "credits_text"
+    ) {
       txt.anchor.set(0.5, 0.5);
     }
     txt.position.set(xpos, ypos);
     container.addChild(txt);
     return container;
   }
+}
+
+function extractInitialAtlSize(
+  steps: AtlStatement[],
+): [number, number] | null {
+  for (const s of steps) {
+    if (s.type !== "step") {
+      break;
+    }
+    const step = s as Extract<AtlStatement, { type: "step" }>;
+    if (step.duration || step.warper) {
+      break;
+    }
+    if (step.properties) {
+      for (const [k, v] of step.properties) {
+        if (k === "size") {
+          const m = /^\(\s*([0-9]+(?:\.[0-9]+)?)\s*,\s*([0-9]+(?:\.[0-9]+)?)\s*\)$/.exec(v.trim());
+          if (m) {
+            return [parseFloat(m[1]), parseFloat(m[2])];
+          }
+        }
+      }
+    }
+  }
+  return null;
 }
 
 export function parseHexColor(hex: string): { color: number; alpha: number } {

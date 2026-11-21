@@ -41,6 +41,7 @@ export class DialogueOverlay {
   private skipping = false;
   private autoForward = false;
   private currentLineSeen = false;
+  private interactiveChoiceOpen = false;
   private readonly activeOverlays = new Set<string>();
 
   private keyDownHandler: ((ev: KeyboardEvent) => void) | null = null;
@@ -236,7 +237,7 @@ export class DialogueOverlay {
         }
         if (
           !this.layerEl.classList.contains("is-hidden") &&
-          this.choiceEl.classList.contains("is-hidden")
+          !this.interactiveChoiceOpen
         ) {
           this.handleAdvanceInput();
         }
@@ -278,14 +279,14 @@ export class DialogueOverlay {
         return;
       }
       if (ev.key === "F5" || (ev.shiftKey && ev.key.toLowerCase() === "s")) {
-        if (this.choiceEl.classList.contains("is-hidden")) {
+        if (!this.interactiveChoiceOpen) {
           ev.preventDefault();
           this.callbacks.onQuickSave();
         }
         return;
       }
       if (ev.key === "F9" || (ev.shiftKey && ev.key.toLowerCase() === "l")) {
-        if (this.choiceEl.classList.contains("is-hidden")) {
+        if (!this.interactiveChoiceOpen) {
           ev.preventDefault();
           this.callbacks.onQuickLoad();
         }
@@ -296,12 +297,12 @@ export class DialogueOverlay {
         return;
       }
       if (ev.key === "h" || ev.key === "H") {
-        if (this.choiceEl.classList.contains("is-hidden")) {
+        if (!this.interactiveChoiceOpen) {
           this.setWindowsHidden(!this.windowsHidden);
         }
         return;
       }
-      if (!this.choiceEl.classList.contains("is-hidden")) {
+      if (this.interactiveChoiceOpen) {
         return;
       }
       if (ev.key === " " || ev.key === "Enter") {
@@ -434,8 +435,34 @@ export class DialogueOverlay {
     }, waitMs);
   }
 
+  public showPassiveChoices(options: string[]): void {
+    this.interactiveChoiceOpen = false;
+    this.choiceEl.innerHTML = "";
+    this.choiceEl.classList.remove("is-hidden");
+    this.choiceEl.style.pointerEvents = "none";
+    const idleBg = this.assets.getAssetUrl("gui/button/choice_idle_background.png");
+    for (const label of options) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ddlc-choice-btn";
+      btn.textContent = label;
+      btn.disabled = true;
+      btn.style.backgroundImage = `url("${idleBg}")`;
+      this.choiceEl.appendChild(btn);
+    }
+  }
+
+  public hideChoices(): void {
+    this.interactiveChoiceOpen = false;
+    this.choiceEl.style.pointerEvents = "";
+    this.choiceEl.classList.add("is-hidden");
+    this.choiceEl.innerHTML = "";
+  }
+
   public showChoices(options: string[], rigged = false): Promise<number> {
     this.setSkipping(false);
+    this.interactiveChoiceOpen = true;
+    this.choiceEl.style.pointerEvents = "";
     this.choiceEl.innerHTML = "";
     this.choiceEl.classList.remove("is-hidden");
 
@@ -474,8 +501,7 @@ export class DialogueOverlay {
               .play("sfx", "gui/sfx/select.ogg", { loop: false })
               .catch(() => {});
           }
-          this.choiceEl.classList.add("is-hidden");
-          this.choiceEl.innerHTML = "";
+          this.hideChoices();
           resolve(idx);
         });
 

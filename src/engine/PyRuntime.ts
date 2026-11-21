@@ -40,7 +40,7 @@ export interface PyRuntimeCallbacks {
   callScreen: (name: string, args: unknown[], kwargs: Record<string, unknown>) => Promise<unknown>;
   showScreen: (name: string, args: unknown[], kwargs: Record<string, unknown>) => void;
   hideScreen: (name: string) => void;
-  displayMenu: (items: Array<[string, unknown]>) => Promise<unknown>;
+  displayMenu: (items: Array<[string, unknown]>, interact?: boolean) => Promise<unknown>;
   setDialogueStyle: (styleName: string) => void;
   setQuickMenu: (visible: boolean) => void;
   runPoemGame: () => Promise<void>;
@@ -57,6 +57,11 @@ export class PyRuntime {
     (args: unknown[], kwargs: Record<string, unknown>) => Promise<unknown> | unknown
   >();
   private readonly scopeStack: Array<Map<string, unknown>> = [];
+  private transformNames = new Set<string>();
+
+  public setTransformNames(names: Iterable<string>): void {
+    this.transformNames = new Set(names);
+  }
 
   public constructor(
     private readonly defaults: DefaultDef[],
@@ -459,7 +464,9 @@ export class PyRuntime {
       },
       show: async (name: string, kwargs?: Record<string, unknown>) => {
         const atList = Array.isArray(kwargs?.at_list)
-          ? (kwargs.at_list as string[])
+          ? kwargs.at_list.filter(
+              (x): x is string => typeof x === "string" && x.trim().length > 0,
+            )
           : [];
         await this.scene.show(name, atList);
       },
@@ -505,8 +512,25 @@ export class PyRuntime {
       ) => {
         return this.callbacks.callScreen(name, args, {});
       },
-      display_menu: async (items: Array<[string, unknown]>) => {
-        return this.callbacks.displayMenu(items);
+      display_menu: async (...callArgs: unknown[]) => {
+        let items: Array<[string, unknown]> = [];
+        let interact = true;
+        if (Array.isArray(callArgs[0])) {
+          items = callArgs[0] as Array<[string, unknown]>;
+          const kw = callArgs[1] as Record<string, unknown> | undefined;
+          if (kw && kw.interact === false) {
+            interact = false;
+          }
+        } else if (callArgs[0] && typeof callArgs[0] === "object") {
+          const kw = callArgs[0] as Record<string, unknown>;
+          if (Array.isArray(kw.items)) {
+            items = kw.items as Array<[string, unknown]>;
+          }
+          if (kw.interact === false) {
+            interact = false;
+          }
+        }
+        return this.callbacks.displayMenu(items, interact);
       },
       music: {
         register_channel: () => {},
@@ -737,8 +761,13 @@ export class PyRuntime {
     switch (node.t) {
       case "const":
         return node.v;
-      case "name":
-        return this.getVar(node.id);
+      case "name": {
+        const val = this.getVar(node.id);
+        if (val === undefined && this.transformNames.has(node.id)) {
+          return node.id;
+        }
+        return val;
+      }
       case "attr": {
         const obj = this.evalExprSync(node.obj);
         if (obj && typeof obj === "object") {
@@ -1005,7 +1034,23 @@ export class PyRuntime {
       }
       return Number(l) + Number(r);
     }
-    if (op === "-") return Number(l) - Number(r);
+    if (op === "-") {
+      if (
+        l &&
+        r &&
+        typeof l === "object" &&
+        typeof r === "object" &&
+        typeof (l as { _ms?: unknown })._ms === "number" &&
+        typeof (r as { _ms?: unknown })._ms === "number"
+      ) {
+        const diffMs = (l as { _ms: number })._ms - (r as { _ms: number })._ms;
+        return {
+          _ms: diffMs,
+          total_seconds: () => diffMs / 1000,
+        };
+      }
+      return Number(l) - Number(r);
+    }
     if (op === "*") {
       if (typeof l === "string" && typeof r === "number") {
         return l.repeat(Math.max(0, Math.floor(r)));

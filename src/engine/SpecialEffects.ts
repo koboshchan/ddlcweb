@@ -10,6 +10,7 @@ import {
   Ticker,
 } from "pixi.js";
 import type { AssetLoader } from "./AssetLoader";
+import type { AudioEngine } from "./AudioEngine";
 import { LOGICAL_HEIGHT, LOGICAL_WIDTH, type Stage } from "./Stage";
 
 const INVERT_VERTEX = `
@@ -241,47 +242,70 @@ export class TearEffect {
 export class InvertEffect {
   private sprite: Sprite | null = null;
   private renderTex: RenderTexture | null = null;
-  private timerId: number | null = null;
+  private showTimerId: number | null = null;
+  private hideTimerId: number | null = null;
+  private audioRef: AudioEngine | null = null;
 
   public constructor(private readonly stage: Stage) {}
 
-  public show(delaySec = 0, screenshotDelaySec = 0): void {
+  public show(lengthSec = 0.15, delaySec = 0, audio?: AudioEngine): void {
     this.hide();
+    this.audioRef = audio ?? null;
+
     const captureAndShow = (): void => {
-      this.renderTex = RenderTexture.create({
-        width: LOGICAL_WIDTH,
-        height: LOGICAL_HEIGHT,
-      });
-      this.stage.app.renderer.render({
-        container: this.stage.app.stage,
-        target: this.renderTex,
-      });
+      const overlayWasVisible = this.stage.layers.overlay.visible;
+      this.stage.layers.overlay.visible = false;
+      try {
+        this.renderTex = RenderTexture.create({
+          width: LOGICAL_WIDTH,
+          height: LOGICAL_HEIGHT,
+        });
+        this.stage.app.renderer.render({
+          container: this.stage.app.stage,
+          target: this.renderTex,
+        });
+      } finally {
+        this.stage.layers.overlay.visible = overlayWasVisible;
+      }
+
       const sp = new Sprite(this.renderTex);
       sp.filters = [new InvertColorFilter()];
-      sp.visible = delaySec <= 0;
+      sp.visible = true;
       this.sprite = sp;
       this.stage.layers.overlay.addChild(sp);
 
-      if (delaySec > 0) {
-        this.timerId = window.setTimeout(() => {
-          if (this.sprite) {
-            this.sprite.visible = true;
-          }
-        }, delaySec * 1000);
+      if (this.audioRef) {
+        void this.audioRef
+          .play("sfx", "sfx/glitch1.ogg", { loop: false })
+          .catch(() => {});
+      }
+
+      if (lengthSec > 0) {
+        this.hideTimerId = window.setTimeout(() => {
+          this.hide();
+        }, lengthSec * 1000);
       }
     };
 
-    if (screenshotDelaySec > 0) {
-      this.timerId = window.setTimeout(captureAndShow, screenshotDelaySec * 1000);
+    if (delaySec > 0) {
+      this.showTimerId = window.setTimeout(captureAndShow, delaySec * 1000);
     } else {
       captureAndShow();
     }
   }
 
   public hide(): void {
-    if (this.timerId !== null) {
-      window.clearTimeout(this.timerId);
-      this.timerId = null;
+    if (this.showTimerId !== null) {
+      window.clearTimeout(this.showTimerId);
+      this.showTimerId = null;
+    }
+    if (this.hideTimerId !== null) {
+      window.clearTimeout(this.hideTimerId);
+      this.hideTimerId = null;
+    }
+    if (this.audioRef) {
+      this.audioRef.stop("sfx", 0);
+      this.audioRef = null;
     }
     if (this.sprite) {
       this.stage.layers.overlay.removeChild(this.sprite);
