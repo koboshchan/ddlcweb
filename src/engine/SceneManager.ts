@@ -1,4 +1,4 @@
-import { Container, Graphics, Ticker } from "pixi.js";
+import { Container, Graphics, RenderTexture, Sprite } from "pixi.js";
 import type {
   AtlStatement,
   ImageDef,
@@ -6,10 +6,27 @@ import type {
   TransformDef,
 } from "../types/game-data";
 import type { AssetLoader } from "./AssetLoader";
+import {
+  AtlRunner,
+  createDefaultAtlState,
+  evaluateAtlNumber,
+  syncStateToNode,
+  type AtlEventName,
+  type AtlRuntimeContext,
+  type AtlState,
+} from "./AtlRunner";
 import type { SavedSpriteState } from "./Persistence";
 import { ImageDissolveFilter } from "./shaders/ImageDissolveFilter";
 import { InvertEffect, TearEffect } from "./SpecialEffects";
 import { LOGICAL_HEIGHT, LOGICAL_WIDTH, type Stage } from "./Stage";
+
+export {
+  ease as easeCubic,
+  easein_quad as easeInQuad,
+  easeout_quad as easeOutQuad,
+  easein_quint as easeInQuint,
+  easein_bounce as easeInBounce,
+} from "./warpers";
 
 interface ShownSprite {
   tag: string;
@@ -20,147 +37,27 @@ interface ShownSprite {
   node: Container;
   baseWidth: number;
   baseHeight: number;
-  xcenter: number;
-  yanchor: number;
-  ypos: number;
-  yoffset: number;
-  xoffset: number;
-  zoom: number;
-  alpha: number;
   zorder: number;
-  cancelAnim?: () => void;
+  runner: AtlRunner;
+  hiding: boolean;
 }
 
+const CHARACTER_TAGS = new Set(["sayori", "natsuki", "yuri", "monika"]);
 const CHARACTER_BASE_SCALE = 0.8;
 
-const SLOT_POSITIONS: Record<string, number> = {
-  t11: 640,
-  f11: 640,
-  i11: 640,
-  h11: 640,
-  s11: 640,
-  d11: 640,
-  l11: 640,
-  hf11: 640,
-  t21: 400,
-  f21: 400,
-  i21: 400,
-  h21: 400,
-  s21: 400,
-  d21: 400,
-  l21: 400,
-  hf21: 400,
-  t22: 880,
-  f22: 880,
-  i22: 880,
-  h22: 880,
-  s22: 880,
-  d22: 880,
-  l22: 880,
-  hf22: 880,
-  t31: 240,
-  f31: 240,
-  i31: 240,
-  h31: 240,
-  s31: 240,
-  d31: 240,
-  l31: 240,
-  hf31: 240,
-  t32: 640,
-  f32: 640,
-  i32: 640,
-  h32: 640,
-  s32: 640,
-  d32: 640,
-  l32: 640,
-  hf32: 640,
-  t33: 1040,
-  f33: 1040,
-  i33: 1040,
-  h33: 1040,
-  s33: 1040,
-  d33: 1040,
-  l33: 1040,
-  hf33: 1040,
-  t41: 200,
-  f41: 200,
-  i41: 200,
-  h41: 200,
-  s41: 200,
-  d41: 200,
-  l41: 200,
-  hf41: 200,
-  t42: 493,
-  f42: 493,
-  i42: 493,
-  h42: 493,
-  s42: 493,
-  d42: 493,
-  l42: 493,
-  hf42: 493,
-  t43: 786,
-  f43: 786,
-  i43: 786,
-  h43: 786,
-  s43: 786,
-  d43: 786,
-  l43: 786,
-  hf43: 786,
-  t44: 1080,
-  f44: 1080,
-  i44: 1080,
-  h44: 1080,
-  s44: 1080,
-  d44: 1080,
-  l44: 1080,
-  hf44: 1080,
-};
-
-export function easeCubic(t: number): number {
-  return 0.5 - Math.cos(Math.PI * t) / 2;
-}
-
-export function easeInQuad(t: number): number {
-  return t * t;
-}
-
-export function easeOutQuad(t: number): number {
-  return 1 - (1 - t) * (1 - t);
-}
-
-export function easeInQuint(t: number): number {
-  return 1 - Math.pow(1 - t, 5);
-}
-
-export function easeInBounce(t: number): number {
-  const n1 = 7.5625;
-  const d1 = 2.75;
-  if (t < 1 / d1) {
-    return n1 * t * t;
-  }
-  if (t < 2 / d1) {
-    const u = t - 1.5 / d1;
-    return n1 * u * u + 0.75;
-  }
-  if (t < 2.5 / d1) {
-    const u = t - 2.25 / d1;
-    return n1 * u * u + 0.9375;
-  }
-  const u = t - 2.625 / d1;
-  return n1 * u * u + 0.984375;
-}
-
 /**
- * Manages Ren'Py's scene layers, sprites, ATL transforms, transitions,
- * Tear/Invert screen overlays, and serializable scene snapshots.
+ * Manages Ren'Py's scene layers, sprites, ATL transforms, true cross-scene
+ * transitions, Tear/Invert screen overlays, and serializable scene snapshots.
  */
 export class SceneManager {
   private readonly sprites = new Map<string, ShownSprite>();
   private currentBgName: string | null = null;
   private currentBgAt: string[] = [];
   private currentBgNode: Container | null = null;
+  private currentBgRunner: AtlRunner | null = null;
   private layerAtMap = new Map<string, string[]>();
-  private layerCancelFns = new Map<string, () => void>();
+  private layerRunners = new Map<string, AtlRunner>();
+  private pendingOldFrameTex: RenderTexture | null = null;
   public readonly tear: TearEffect;
   public readonly invert: InvertEffect;
   private evalAstFn?: (node: PyExprNode | null | undefined) => unknown;
@@ -169,10 +66,11 @@ export class SceneManager {
   public constructor(
     private readonly stage: Stage,
     private readonly assets: AssetLoader,
-    _transformDefs: Record<string, TransformDef> = {},
+    private readonly transformDefs: Record<string, TransformDef> = {},
   ) {
     this.tear = new TearEffect(stage);
     this.invert = new InvertEffect(stage);
+    this.assets.setAtlConfig(this.transformDefs, (expr) => this.evalNumeric(expr));
   }
 
   public setEvaluators(
@@ -181,6 +79,60 @@ export class SceneManager {
   ): void {
     this.evalAstFn = evalAst;
     this.evalVarFn = evalVar;
+    this.assets.setAtlConfig(this.transformDefs, (expr) =>
+      this.evalNumeric(expr),
+    );
+  }
+
+  public hasSprite(tag: string): boolean {
+    const sp = this.sprites.get(tag);
+    return Boolean(sp && !sp.hiding);
+  }
+
+  /**
+   * Discards any unconsumed pre-mutation frame snapshot at the end of a `with`
+   * transition or dialogue/menu/pause beat so the next scene mutation captures fresh.
+   */
+  public markTransitionCheckpoint(): void {
+    if (this.pendingOldFrameTex) {
+      this.pendingOldFrameTex.destroy(true);
+      this.pendingOldFrameTex = null;
+    }
+  }
+
+  private captureOldFrameIfNeeded(): void {
+    if (this.pendingOldFrameTex || !this.currentBgNode) {
+      return;
+    }
+    const overlayWasVisible = this.stage.layers.overlay.visible;
+    const screensWasVisible = this.stage.layers.screens.visible;
+    this.stage.layers.overlay.visible = false;
+    this.stage.layers.screens.visible = false;
+    try {
+      const rt = RenderTexture.create({
+        width: LOGICAL_WIDTH,
+        height: LOGICAL_HEIGHT,
+      });
+      this.stage.app.renderer.render({
+        container: this.stage.app.stage,
+        target: rt,
+      });
+      this.pendingOldFrameTex = rt;
+    } finally {
+      this.stage.layers.overlay.visible = overlayWasVisible;
+      this.stage.layers.screens.visible = screensWasVisible;
+    }
+  }
+
+  private createAtlContext(wrapContent = true): AtlRuntimeContext {
+    return {
+      assets: this.assets,
+      ticker: this.stage.app.ticker,
+      transformDefs: this.transformDefs,
+      evalExpr: (expr, locals) =>
+        evaluateAtlNumber(expr, locals, (e) => this.evalNumeric(e)),
+      wrapContent,
+    };
   }
 
   private getLayerContainer(layerName: string): Container {
@@ -209,23 +161,35 @@ export class SceneManager {
     return {
       bg: this.currentBgName,
       bgAt: [...this.currentBgAt],
-      sprites: Array.from(this.sprites.values()).map((s) => ({
-        tag: s.tag,
-        imageName: s.imageName,
-        layerName: s.layerName,
-        at: [...s.atTransforms],
-        x: s.node.position.x,
-        y: s.node.position.y,
-        xcenter: s.xcenter,
-        ypos: s.ypos,
-        yanchor: s.yanchor,
-        xoffset: s.xoffset,
-        yoffset: s.yoffset,
-        zoom: s.node.scale.x,
-        alpha: s.node.alpha,
-        zorder: s.zorder,
-        isTopLeftOverlay: s.isTopLeftOverlay,
-      })),
+      sprites: Array.from(this.sprites.values())
+        .filter((s) => !s.hiding)
+        .map((s) => {
+          const st = s.runner.state;
+          const xcenter = st.xposRel ? st.xpos * LOGICAL_WIDTH : st.xpos;
+          const ypos = st.yposRel ? st.ypos * LOGICAL_HEIGHT : st.ypos;
+          const yanchor = st.yanchorRel
+            ? st.yanchor
+            : s.baseHeight > 0
+              ? st.yanchor / s.baseHeight
+              : 1.0;
+          return {
+            tag: s.tag,
+            imageName: s.imageName,
+            layerName: s.layerName,
+            at: [...s.atTransforms],
+            x: s.node.position.x,
+            y: s.node.position.y,
+            xcenter,
+            ypos,
+            yanchor,
+            xoffset: st.xoffset,
+            yoffset: st.yoffset,
+            zoom: st.zoom,
+            alpha: s.node.alpha,
+            zorder: s.zorder,
+            isTopLeftOverlay: s.isTopLeftOverlay,
+          };
+        }),
       layerAt,
     };
   }
@@ -248,18 +212,31 @@ export class SceneManager {
         this.showLayer(layer, at);
       }
     }
+    this.markTransitionCheckpoint();
   }
 
   public resetAllLayers(): void {
+    this.markTransitionCheckpoint();
     for (const sp of this.sprites.values()) {
-      sp.cancelAnim?.();
+      sp.runner.stop();
     }
     this.sprites.clear();
-    for (const cancel of this.layerCancelFns.values()) {
-      cancel();
+    this.currentBgRunner?.stop();
+    this.currentBgRunner = null;
+    for (const runner of this.layerRunners.values()) {
+      runner.stop();
     }
-    this.layerCancelFns.clear();
+    this.layerRunners.clear();
     this.layerAtMap.clear();
+    for (const layerName of ["master", "screens", "transient"]) {
+      const container = this.getLayerContainer(layerName);
+      container.pivot.set(0, 0);
+      container.position.set(0, 0);
+      container.scale.set(1);
+      container.angle = 0;
+      container.alpha = 1;
+      container.blendMode = "normal";
+    }
     this.currentBgName = null;
     this.currentBgAt = [];
     this.currentBgNode = null;
@@ -272,28 +249,57 @@ export class SceneManager {
       evalAst: this.evalAstFn,
       ticker: this.stage.app.ticker,
     });
-    const isCharacter = ["sayori", "natsuki", "yuri", "monika"].includes(
-      saved.tag,
-    );
+    const isCharacter = CHARACTER_TAGS.has(saved.tag);
     const bounds = node.getLocalBounds();
     const baseWidth =
       bounds.width > 0 ? bounds.width : isCharacter ? 960 : LOGICAL_WIDTH;
     const baseHeight =
       bounds.height > 0 ? bounds.height : isCharacter ? 960 : LOGICAL_HEIGHT;
 
-    if (saved.isTopLeftOverlay) {
-      node.pivot.set(0, 0);
-      node.position.set(saved.x, saved.y);
-      node.scale.set(saved.zoom);
-    } else {
-      node.pivot.set(baseWidth * 0.5, baseHeight * saved.yanchor);
-      node.position.set(saved.x, saved.y);
-      node.scale.set(saved.zoom);
-    }
-    node.alpha = saved.alpha;
+    const initialState: Partial<AtlState> = saved.isTopLeftOverlay
+      ? {
+          xpos: saved.x,
+          xposRel: false,
+          ypos: saved.y,
+          yposRel: false,
+          xanchor: 0,
+          xanchorRel: false,
+          yanchor: 0,
+          yanchorRel: false,
+          xoffset: saved.xoffset,
+          yoffset: saved.yoffset,
+          zoom: saved.zoom,
+          alpha: saved.alpha,
+        }
+      : {
+          xpos: saved.xcenter,
+          xposRel: false,
+          xanchor: 0.5,
+          xanchorRel: true,
+          ypos: saved.ypos,
+          yposRel: false,
+          yanchor: saved.yanchor,
+          yanchorRel: true,
+          xoffset: saved.xoffset,
+          yoffset: saved.yoffset,
+          zoom: saved.zoom,
+          alpha: saved.alpha,
+        };
+
+    const runner = new AtlRunner(node, this.createAtlContext(true), initialState, {
+      width: baseWidth,
+      height: baseHeight,
+    });
     node.zIndex = saved.zorder;
     layerContainer.sortableChildren = true;
     layerContainer.addChild(node);
+    syncStateToNode(
+      node,
+      node.children[0] as Container,
+      runner.state,
+      baseWidth,
+      baseHeight,
+    );
 
     const record: ShownSprite = {
       tag: saved.tag,
@@ -304,28 +310,23 @@ export class SceneManager {
       node,
       baseWidth,
       baseHeight,
-      xcenter: saved.xcenter,
-      yanchor: saved.yanchor,
-      ypos: saved.ypos,
-      xoffset: saved.xoffset,
-      yoffset: saved.yoffset,
-      zoom: saved.zoom,
-      alpha: saved.alpha,
       zorder: saved.zorder,
+      runner,
+      hiding: false,
     };
     this.sprites.set(saved.tag, record);
 
-    // Re-attach continuous looping ATL transforms without replaying one-shot intros
     const continuous = saved.at.filter((name) => {
       const base = name.trim().split("(")[0];
       return (
         base === "panic" ||
         base === "n_cg2_wiggle_loop" ||
+        base === "vignetteflicker" ||
         base.startsWith("credits_")
       );
     });
     if (continuous.length > 0) {
-      this.attachSpecialAtl(record, continuous);
+      runner.start(this.atNamesToSteps(continuous), "replace");
     }
   }
 
@@ -338,13 +339,23 @@ export class SceneManager {
       atl?: AtlStatement[];
     },
   ): Promise<void> {
+    this.captureOldFrameIfNeeded();
+
     for (const sp of this.sprites.values()) {
-      sp.cancelAnim?.();
+      sp.runner.stop();
     }
     this.sprites.clear();
-    this.stage.layers.master.removeChildren();
-    this.stage.layers.transient.removeChildren();
-    this.stage.layers.background.removeChildren();
+    this.currentBgRunner?.stop();
+    this.currentBgRunner = null;
+    for (const child of this.stage.layers.master.removeChildren()) {
+      child.destroy({ children: true });
+    }
+    for (const child of this.stage.layers.transient.removeChildren()) {
+      child.destroy({ children: true });
+    }
+    for (const child of this.stage.layers.background.removeChildren()) {
+      child.destroy({ children: true });
+    }
 
     this.currentBgName = imageName;
     this.currentBgAt = [...(options?.at ?? [])];
@@ -353,14 +364,24 @@ export class SceneManager {
       ticker: this.stage.app.ticker,
       paramText: options?.paramText,
     });
+    const bounds = node.getLocalBounds();
+    const baseW = bounds.width > 0 ? bounds.width : LOGICAL_WIDTH;
+    const baseH = bounds.height > 0 ? bounds.height : LOGICAL_HEIGHT;
     this.stage.layers.background.addChild(node);
     this.currentBgNode = node;
 
-    if (options?.at && options.at.length > 0) {
-      this.applyStaticAtToNode(node, options.at);
-    }
-    if (options?.atl && options.atl.length > 0) {
-      this.applyInlineAtl(node, options.atl);
+    const steps: AtlStatement[] = [
+      ...this.atNamesToSteps(options?.at ?? []),
+      ...(options?.atl ?? []),
+    ];
+    if (steps.length > 0) {
+      this.currentBgRunner = new AtlRunner(
+        node,
+        this.createAtlContext(true),
+        undefined,
+        { width: baseW, height: baseH },
+      );
+      this.currentBgRunner.start(steps, "show");
     }
   }
 
@@ -376,6 +397,8 @@ export class SceneManager {
       atl?: AtlStatement[];
     },
   ): Promise<void> {
+    this.captureOldFrameIfNeeded();
+
     const trimmed = imageNameOrTag.trim();
     const parts = trimmed.split(/\s+/);
     const tag = options?.tag || parts[0] || trimmed;
@@ -383,7 +406,6 @@ export class SceneManager {
     const layerName = options?.layer || existing?.layerName || "master";
     const layerContainer = this.getLayerContainer(layerName);
 
-    // Handle tag-only `show sayori at s11`: reuse existing displayed pose!
     const isTagOnly =
       !options?.def &&
       !options?.paramText &&
@@ -392,12 +414,25 @@ export class SceneManager {
       !this.assets.resolveGamePath(trimmed) &&
       existing !== undefined;
 
+    const isHideTransform = atTransforms.some((raw) => {
+      const base = raw.trim().split("(")[0];
+      return base === "thide" || base === "lhide";
+    });
+
     let node: Container;
     let resolvedImageName = trimmed;
+    const prevState: Partial<AtlState> | undefined = existing
+      ? { ...existing.runner.state }
+      : undefined;
 
     if (isTagOnly && existing) {
       node = existing.node;
       resolvedImageName = existing.imageName;
+      existing.hiding = false;
+      if (existing.layerName !== layerName) {
+        this.getLayerContainer(existing.layerName).removeChild(node);
+        layerContainer.addChild(node);
+      }
     } else {
       if (options?.def) {
         node = await this.assets.buildFromDef(
@@ -417,172 +452,56 @@ export class SceneManager {
         });
       }
       if (existing) {
-        existing.cancelAnim?.();
+        existing.runner.stop();
         this.getLayerContainer(existing.layerName).removeChild(existing.node);
+        existing.node.destroy({ children: true });
       }
       layerContainer.addChild(node);
     }
 
-    const isCharacter = ["sayori", "natsuki", "yuri", "monika"].includes(tag);
+    const isCharacter = CHARACTER_TAGS.has(tag);
     const bounds = node.getLocalBounds();
-    const baseWidth = bounds.width > 0 ? bounds.width : isCharacter ? 960 : LOGICAL_WIDTH;
-    const baseHeight = bounds.height > 0 ? bounds.height : isCharacter ? 960 : LOGICAL_HEIGHT;
+    const baseWidth =
+      bounds.width > 0 ? bounds.width : isCharacter ? 960 : LOGICAL_WIDTH;
+    const baseHeight =
+      bounds.height > 0 ? bounds.height : isCharacter ? 960 : LOGICAL_HEIGHT;
 
-    let xcenter = existing ? existing.xcenter : LOGICAL_WIDTH / 2;
-    let zoom = existing
-      ? existing.zoom
-      : isCharacter
-        ? CHARACTER_BASE_SCALE
-        : 1.0;
-    let ypos = existing
-      ? existing.ypos
-      : isCharacter
-        ? LOGICAL_HEIGHT * 1.03
-        : LOGICAL_HEIGHT / 2;
-    let yanchor = existing ? existing.yanchor : isCharacter ? 1.0 : 0.5;
-    let xoffset = 0;
-    let yoffset = 0;
-    let alpha = 1.0;
-    let animateFromX: number | null = null;
-    let doHop = false;
-    let doDip = false;
-    let doSink = false;
-    let doHideAfter: "thide" | "lhide" | null = null;
-
-    // For non-character overlays/CGs/text without explicit `at`, default to top-left (0, 0).
+    const hasExplicitTransform =
+      atTransforms.length > 0 || Boolean(options?.atl && options.atl.length > 0);
     const isTopLeftOverlay =
       !isCharacter &&
-      atTransforms.length === 0 &&
+      !hasExplicitTransform &&
       !existing &&
       !trimmed.startsWith("credits_") &&
       !trimmed.startsWith("poem_");
 
-    if (isTopLeftOverlay) {
-      node.pivot.set(0, 0);
-      node.position.set(0, 0);
-      node.scale.set(1);
+    let startState: Partial<AtlState>;
+    if (prevState) {
+      startState = prevState;
+    } else if (isCharacter && !hasExplicitTransform) {
+      startState = {
+        xpos: LOGICAL_WIDTH / 2,
+        xposRel: false,
+        xanchor: 0.5,
+        xanchorRel: true,
+        ypos: 1.03,
+        yposRel: true,
+        yanchor: 1.0,
+        yanchorRel: true,
+        zoom: CHARACTER_BASE_SCALE,
+        alpha: 1,
+      };
+    } else {
+      startState = createDefaultAtlState();
     }
 
-    for (const rawAt of atTransforms) {
-      const name = rawAt.trim();
-      const callMatch = /^([a-zA-Z0-9_]+)\((.*)\)$/.exec(name);
-      const baseName = callMatch ? callMatch[1] : name;
-      const argStr = callMatch ? callMatch[2] : "";
-
-      if (baseName in SLOT_POSITIONS) {
-        xcenter = SLOT_POSITIONS[baseName];
-      }
-      if (baseName.startsWith("f") && baseName !== "face") {
-        zoom = CHARACTER_BASE_SCALE * 1.05;
-      } else if (baseName.startsWith("t") && baseName !== "truecenter" && baseName !== "thide") {
-        zoom = CHARACTER_BASE_SCALE;
-      } else if (baseName.startsWith("i") || baseName.startsWith("s") || baseName.startsWith("d")) {
-        if (baseName !== "sink") {
-          zoom = CHARACTER_BASE_SCALE;
-        }
-      }
-
-      if (baseName.startsWith("h") && baseName !== "hop" && baseName !== "hopfocus") {
-        doHop = true;
-      }
-      if (baseName === "hop") {
-        doHop = true;
-      }
-      if (baseName === "hopfocus") {
-        zoom = CHARACTER_BASE_SCALE * 1.05;
-        doHop = true;
-      }
-      if (baseName.startsWith("d") && baseName !== "dizzy") {
-        doDip = true;
-      }
-      if (baseName === "dip") {
-        doDip = true;
-      }
-      if (baseName.startsWith("l") && baseName !== "lhide" && baseName !== "layerflicker") {
-        animateFromX = -300;
-      }
-      if (baseName === "leftin") {
-        animateFromX = -300;
-      }
-      if (
-        baseName === "sink" ||
-        /^s[1-4][1-4]$/.test(baseName)
-      ) {
-        doSink = true;
-        ypos = LOGICAL_HEIGHT * 1.06;
-      } else if (isCharacter && /^([tifhld]|hf)[1-4][1-4]$/.test(baseName)) {
-        ypos = LOGICAL_HEIGHT * 1.03;
-      }
-
-      if (baseName === "thide") {
-        doHideAfter = "thide";
-      }
-      if (baseName === "lhide") {
-        doHideAfter = "lhide";
-      }
-      if (baseName === "face") {
-        yanchor = 1.0;
-        xcenter = 640;
-        ypos = LOGICAL_HEIGHT * 1.03;
-        yoffset = argStr.includes("y=")
-          ? this.evalNumeric(argStr.split("y=")[1])
-          : 500;
-        zoom = CHARACTER_BASE_SCALE * 2.0;
-      }
-      if (baseName === "truecenter" || baseName === "center") {
-        xcenter = LOGICAL_WIDTH / 2;
-        ypos = LOGICAL_HEIGHT / 2;
-        yanchor = 0.5;
-        zoom = 1.0;
-      }
-      if (baseName === "malpha") {
-        xcenter = 640;
-        yanchor = 1.0;
-        ypos = LOGICAL_HEIGHT * 1.03;
-        zoom = CHARACTER_BASE_SCALE;
-        alpha = Math.max(0, Math.min(1, this.evalNumeric(argStr || "1.0")));
-      }
-      if (baseName === "sticker_left") {
-        xcenter = 100;
-        ypos = LOGICAL_HEIGHT * 0.9;
-        yanchor = 0.9;
-        zoom = 1.0;
-      }
-      if (baseName === "sticker_mid") {
-        xcenter = 220;
-        ypos = LOGICAL_HEIGHT * 0.9;
-        yanchor = 0.9;
-        zoom = 1.0;
-      }
-      if (baseName === "sticker_right") {
-        xcenter = 340;
-        ypos = LOGICAL_HEIGHT * 0.9;
-        yanchor = 0.9;
-        zoom = 1.0;
-      }
-      if (baseName === "sticker_glitch") {
-        xcenter = 50;
-        ypos = LOGICAL_HEIGHT * 1.35;
-        yanchor = 0.5;
-        zoom = 1.0;
-      }
-      if (baseName === "sticker_m_glitch") {
-        xcenter = 100;
-        ypos = LOGICAL_HEIGHT * 1.15;
-        yanchor = 0.5;
-        zoom = 1.0;
-      }
-    }
-
-    if (!isTopLeftOverlay) {
-      node.pivot.set(baseWidth * 0.5, baseHeight * yanchor);
-      node.scale.set(zoom);
-      node.position.set(
-        (animateFromX ?? xcenter) + xoffset,
-        ypos + yoffset,
-      );
-      node.alpha = alpha;
-    }
+    const runner =
+      isTagOnly && existing
+        ? existing.runner
+        : new AtlRunner(node, this.createAtlContext(true), startState, {
+            width: baseWidth,
+            height: baseHeight,
+          });
 
     const zorder = options?.zorder
       ? parseInt(options.zorder, 10) || 0
@@ -602,230 +521,62 @@ export class SceneManager {
       node,
       baseWidth,
       baseHeight,
-      xcenter,
-      yanchor,
-      ypos,
-      yoffset,
-      xoffset,
-      zoom,
-      alpha,
       zorder,
+      runner,
+      hiding: isHideTransform,
     };
     this.sprites.set(tag, record);
 
-    if (options?.atl && options.atl.length > 0) {
-      this.applyInlineAtl(node, options.atl);
-    }
+    const steps: AtlStatement[] = [
+      ...this.atNamesToSteps(atTransforms),
+      ...(options?.atl ?? []),
+    ];
+    const eventName: AtlEventName = isHideTransform
+      ? "hide"
+      : existing
+        ? "replace"
+        : "show";
 
-    // Run continuous or special ATL animations
-    this.attachSpecialAtl(record, atTransforms);
-
-    if (doHideAfter === "thide") {
-      await this.tween(250, (p) => {
-        const e = easeCubic(p);
-        node.alpha = 1 - e;
-        node.scale.set(zoom * (1 - 0.05 * e));
-        node.position.y = ypos - 20 * e;
-      });
-      this.sprites.delete(tag);
-      layerContainer.removeChild(node);
-      return;
-    }
-
-    if (doHideAfter === "lhide") {
-      const startX = node.position.x;
-      await this.tween(250, (p) => {
-        node.position.x = startX + (-300 - startX) * easeOutQuad(p);
-      });
-      this.sprites.delete(tag);
-      layerContainer.removeChild(node);
-      return;
-    }
-
-    if (animateFromX !== null) {
-      await this.tween(250, (p) => {
-        node.position.x = animateFromX + (xcenter - animateFromX) * easeCubic(p);
-      });
-    } else if (existing && existing.xcenter !== xcenter) {
-      const startX = existing.xcenter;
-      await this.tween(250, (p) => {
-        node.position.x = startX + (xcenter - startX) * easeCubic(p);
-      });
-    }
-
-    if (doSink) {
-      const startY = existing?.ypos ?? LOGICAL_HEIGHT * 1.03;
-      node.position.y = startY;
-      await this.tween(500, (p) => {
-        node.position.y = startY + (LOGICAL_HEIGHT * 1.06 - startY) * easeInQuad(p);
-      });
-    }
-
-    if (doHop) {
-      const baseY = node.position.y;
-      await this.tween(100, (p) => {
-        node.position.y = baseY - 20 * easeInQuad(p);
-      });
-      await this.tween(100, (p) => {
-        node.position.y = baseY - 20 * (1 - easeOutQuad(p));
-      });
-    }
-
-    if (doDip) {
-      const baseY = node.position.y;
-      await this.tween(250, (p) => {
-        node.position.y = baseY + 25 * easeInQuad(p);
-      });
-      await this.tween(250, (p) => {
-        node.position.y = baseY + 25 * (1 - easeOutQuad(p));
-      });
-    }
-  }
-
-  private attachSpecialAtl(record: ShownSprite, atTransforms: string[]): void {
-    const node = record.node;
-    for (const rawAt of atTransforms) {
-      const name = rawAt.trim();
-      const base = name.split("(")[0];
-
-      if (base === "panic") {
-        let elapsed = 0;
-        const baseX = record.xcenter;
-        const baseY = record.ypos;
-        const tick = (t: Ticker): void => {
-          elapsed += t.deltaMS / 1000;
-          node.position.y = baseY + 12.5 * (1 - Math.cos((elapsed / 1.2) * Math.PI));
-          node.position.x = baseX + Math.sin((elapsed / 0.6) * Math.PI) * 20;
-        };
-        this.stage.app.ticker.add(tick);
-        record.cancelAnim = () => this.stage.app.ticker.remove(tick);
-      } else if (base === "cgfade") {
-        node.alpha = 0;
-        void this.tween(500, (p) => {
-          node.alpha = p;
-        });
-      } else if (base === "noise_alpha") {
-        node.alpha = 0.25;
-      } else if (base === "noisefade" || base === "vignettefade") {
-        const targetAlpha = base === "noisefade" ? 0.4 : 1.0;
-        const durationMs = base === "noisefade" ? 5000 : 25000;
-        node.alpha = 0;
-        void this.tween(durationMs, (p) => {
-          node.alpha = targetAlpha * p;
-        });
-      } else if (base === "n_cg2_zoom") {
-        node.pivot.set(record.baseWidth * 0.5, record.baseHeight * 0.5);
-        node.position.set(LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2);
-        void this.tween(200, (p) => {
-          const e = easeOutQuad(p);
-          node.scale.set(1 + 1.5 * e);
-          node.position.x = LOGICAL_WIDTH / 2 + 200 * e;
-        });
-      } else if (base === "n_cg2_wiggle" || base === "n_cg2_wiggle_loop") {
-        let elapsed = 0;
-        const baseX = node.position.x;
-        const tick = (t: Ticker): void => {
-          elapsed += t.deltaMS / 1000;
-          const phase = elapsed % 2.2;
-          if (phase < 1.2) {
-            node.position.x = baseX + Math.sin(phase * Math.PI * 3.33) * 15 * (1 - phase / 1.2);
-          } else {
-            node.position.x = baseX;
-            if (base === "n_cg2_wiggle") {
-              this.stage.app.ticker.remove(tick);
-            }
+    if (steps.length > 0) {
+      runner.start(steps, eventName, {}, () => {
+        if (record.hiding && this.sprites.get(tag) === record) {
+          this.sprites.delete(tag);
+          if (node.parent === layerContainer) {
+            layerContainer.removeChild(node);
           }
-        };
-        this.stage.app.ticker.add(tick);
-        record.cancelAnim = () => this.stage.app.ticker.remove(tick);
-      } else if (base === "s_kill_bg_start") {
-        node.pivot.set(record.baseWidth * 0.5, record.baseHeight * 0.5);
-        node.position.set(LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2);
-        node.scale.set(1.1);
-        void this.tween(4000, (p) => {
-          node.scale.set(1.1 - 0.1 * p);
-        });
-      } else if (base === "s_kill_start") {
-        node.pivot.set(record.baseWidth * 0.3, record.baseHeight * 0.25);
-        node.position.set(LOGICAL_WIDTH * 0.3, LOGICAL_HEIGHT * 0.25);
-        node.scale.set(0.8);
-        void this.tween(4000, (p) => {
-          node.scale.set(0.8 - 0.05 * p);
-          node.position.y = LOGICAL_HEIGHT * 0.25 + 10 * p;
-        });
-      } else if (
-        base === "credits_scroll_left" ||
-        base === "credits_scroll_right" ||
-        base === "credits_text_scroll_left" ||
-        base === "credits_text_scroll_right" ||
-        base.startsWith("credits_sticker_")
-      ) {
-        if (base === "credits_scroll_left") {
-          node.pivot.set(record.baseWidth * 0.1, 0);
-          node.position.set(LOGICAL_WIDTH * 0.1, 740);
-        } else if (base === "credits_scroll_right") {
-          node.pivot.set(record.baseWidth * 0.9, 0);
-          node.position.set(LOGICAL_WIDTH * 0.9, 740);
-        } else if (base === "credits_text_scroll_left") {
-          node.position.set(320, 920);
-        } else if (base === "credits_text_scroll_right") {
-          node.position.set(960, 920);
-        } else {
-          const idx = parseInt(base.slice(-1), 10) || 1;
-          const xs = [0.32, 0.44, 0.56, 0.68];
-          node.pivot.set(record.baseWidth * 0.5, record.baseHeight);
-          node.position.set(LOGICAL_WIDTH * (xs[idx - 1] ?? 0.5), 940);
+          node.destroy({ children: true });
         }
-        const startY = node.position.y;
-        const endY = startY - 1120;
-        void this.tween(15000, (p) => {
-          node.position.y = startY + (endY - startY) * p;
-        });
-      }
+      });
+    } else if (prevState) {
+      syncStateToNode(
+        node,
+        (node.children[0] as Container) ?? node,
+        runner.state,
+        baseWidth,
+        baseHeight,
+      );
+    } else if (isCharacter && !hasExplicitTransform) {
+      syncStateToNode(
+        node,
+        (node.children[0] as Container) ?? node,
+        runner.state,
+        baseWidth,
+        baseHeight,
+      );
     }
   }
 
-  private applyStaticAtToNode(node: Container, atTransforms: string[]): void {
-    for (const rawAt of atTransforms) {
-      const name = rawAt.trim();
-      if (name === "truecenter" || name === "center") {
-        const b = node.getLocalBounds();
-        node.pivot.set(b.width * 0.5, b.height * 0.5);
-        node.position.set(LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2);
-      }
-    }
-  }
+  public showLayer(
+    layerName: string,
+    atTransforms: string[] = [],
+    atl?: AtlStatement[],
+  ): void {
+    this.captureOldFrameIfNeeded();
 
-  private applyInlineAtl(node: Container, steps: AtlStatement[]): void {
-    for (const st of steps) {
-      if (st.type !== "step") {
-        continue;
-      }
-      const step = st as Extract<AtlStatement, { type: "step" }>;
-      for (const [prop, valStr] of step.properties ?? []) {
-        const val = this.evalNumeric(valStr);
-        if (prop === "alpha") {
-          node.alpha = Math.max(0, Math.min(1, val));
-        } else if (prop === "xpos") {
-          node.position.x = val <= 1 && valStr.includes(".") ? val * LOGICAL_WIDTH : val;
-        } else if (prop === "ypos") {
-          node.position.y = val <= 1 && valStr.includes(".") ? val * LOGICAL_HEIGHT : val;
-        } else if (prop === "xoffset") {
-          node.position.x += val;
-        } else if (prop === "yoffset") {
-          node.position.y += val;
-        } else if (prop === "zoom") {
-          node.scale.set(val);
-        }
-      }
-    }
-  }
-
-  public showLayer(layerName: string, atTransforms: string[] = []): void {
-    const prevCancel = this.layerCancelFns.get(layerName);
-    if (prevCancel) {
-      prevCancel();
-      this.layerCancelFns.delete(layerName);
+    const prev = this.layerRunners.get(layerName);
+    if (prev) {
+      prev.stop();
+      this.layerRunners.delete(layerName);
     }
 
     if (atTransforms.length === 0) {
@@ -835,70 +586,29 @@ export class SceneManager {
     }
 
     const container = this.getLayerContainer(layerName);
-    container.pivot.set(LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2);
-    container.position.set(LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2);
+    container.pivot.set(0, 0);
+    container.position.set(0, 0);
     container.scale.set(1);
+    container.angle = 0;
+    container.alpha = 1;
+    container.blendMode = "normal";
 
-    if (atTransforms.length === 0) {
+    const steps: AtlStatement[] = [
+      ...this.atNamesToSteps(atTransforms),
+      ...(atl ?? []),
+    ];
+    if (steps.length === 0) {
       return;
     }
 
-    const first = atTransforms[0].trim();
-    if (first.startsWith("heartbeat")) {
-      let elapsed = 0;
-      const tick = (t: Ticker): void => {
-        elapsed += t.deltaMS / 1000;
-        const beat = Math.pow(Math.sin(elapsed * 2.1), 16);
-        container.scale.set(1 + 0.06 * beat);
-      };
-      this.stage.app.ticker.add(tick);
-      this.layerCancelFns.set(layerName, () => {
-        this.stage.app.ticker.remove(tick);
-        container.scale.set(1);
-      });
-    } else if (first.startsWith("dizzy")) {
-      let elapsed = 0;
-      const tick = (t: Ticker): void => {
-        elapsed += t.deltaMS / 1000;
-        container.position.set(
-          LOGICAL_WIDTH / 2 + Math.sin(elapsed * 2.2) * 8,
-          LOGICAL_HEIGHT / 2 + Math.cos(elapsed * 1.6) * 5,
-        );
-      };
-      this.stage.app.ticker.add(tick);
-      this.layerCancelFns.set(layerName, () => {
-        this.stage.app.ticker.remove(tick);
-        container.position.set(LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2);
-      });
-    } else if (first.startsWith("rewind")) {
-      container.scale.set(1.2);
-      let elapsed = 0;
-      const tick = (t: Ticker): void => {
-        elapsed += t.deltaMS / 1000;
-        container.position.set(
-          LOGICAL_WIDTH / 2 + Math.sin(elapsed * 16) * 24,
-          LOGICAL_HEIGHT / 2 + Math.cos(elapsed * 10) * 16,
-        );
-      };
-      this.stage.app.ticker.add(tick);
-      this.layerCancelFns.set(layerName, () => {
-        this.stage.app.ticker.remove(tick);
-        container.scale.set(1);
-        container.position.set(LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2);
-      });
-    } else if (first.startsWith("layerflicker")) {
-      let elapsed = 0;
-      const tick = (t: Ticker): void => {
-        elapsed += t.deltaMS / 1000;
-        const zoom = 1 + 0.04 * (Math.sin(elapsed * 8) > 0.5 ? 1 : 0);
-        container.scale.set(zoom);
-      };
-      this.stage.app.ticker.add(tick);
-      this.layerCancelFns.set(layerName, () => {
-        this.stage.app.ticker.remove(tick);
-        container.scale.set(1);
-      });
-    }
+    const runner = new AtlRunner(
+      container,
+      this.createAtlContext(false),
+      createDefaultAtlState(),
+      { width: LOGICAL_WIDTH, height: LOGICAL_HEIGHT },
+    );
+    this.layerRunners.set(layerName, runner);
+    runner.start(steps, "show");
   }
 
   public async hide(tagOrName: string): Promise<void> {
@@ -907,62 +617,83 @@ export class SceneManager {
     if (!existing) {
       return;
     }
-    existing.cancelAnim?.();
+    if (existing.hiding) {
+      // Let active `thide`/`lhide` animation complete naturally in background
+      return;
+    }
+    this.captureOldFrameIfNeeded();
+    existing.runner.stop();
     this.sprites.delete(tag);
     this.getLayerContainer(existing.layerName).removeChild(existing.node);
+    existing.node.destroy({ children: true });
   }
 
   public async runTransition(expr: string | null, resolvedMs?: number): Promise<void> {
     if (!expr || expr === "None") {
+      this.markTransitionCheckpoint();
       return;
     }
+
+    const oldTex = this.pendingOldFrameTex;
+    this.pendingOldFrameTex = null;
 
     const lower = expr.toLowerCase();
 
     if (lower === "wipeleft") {
-      await this.imageDissolveTransition("images/menu/wipeleft.png", 500);
+      await this.imageDissolveTransition("images/menu/wipeleft.png", 500, 64, oldTex);
       return;
     }
 
     if (lower === "wipeleft_scene") {
-      await this.curtainWipeScene("images/menu/wipeleft.png", 500, 250);
+      await this.curtainWipeScene("images/menu/wipeleft.png", 500, 250, 64, oldTex);
       return;
     }
 
     if (lower.includes("imagedissolve")) {
-      const m = /ImageDissolve\("([^"]+)"\s*,\s*([0-9.]+)/i.exec(expr);
+      const m = /ImageDissolve\("([^"]+)"\s*,\s*([0-9.]+)(?:.*ramplen=([0-9]+))?/i.exec(
+        expr,
+      );
       if (m) {
-        await this.imageDissolveTransition(m[1], parseFloat(m[2]) * 1000);
+        const ramplen = m[3] ? parseInt(m[3], 10) : 8;
+        await this.imageDissolveTransition(
+          m[1],
+          parseFloat(m[2]) * 1000,
+          ramplen,
+          oldTex,
+        );
         return;
       }
     }
 
     if (lower === "dissolve_scene_full") {
-      await this.fadeBlackCurtain(1000, 1000, 1000);
+      await this.fadeBlackCurtain(1000, 1000, 1000, oldTex);
       return;
     }
 
     if (lower === "dissolve_scene_half") {
-      await this.fadeBlackCurtain(0, 1000, 1000);
+      oldTex?.destroy(true);
+      await this.fadeBlackCurtain(0, 1000, 1000, null);
       return;
     }
 
     if (lower === "close_eyes") {
-      await this.fadeBlackCurtain(500, 250, 0);
+      await this.fadeBlackCurtain(500, 250, 0, oldTex);
       return;
     }
 
     if (lower === "open_eyes") {
-      await this.fadeBlackCurtain(0, 0, 500);
+      await this.dissolveTransition(500, oldTex);
       return;
     }
 
     if (lower === "trueblack") {
+      oldTex?.destroy(true);
       await this.pauseMs(250);
       return;
     }
 
     if (lower === "tpause") {
+      oldTex?.destroy(true);
       await this.pauseMs(250);
       return;
     }
@@ -979,10 +710,28 @@ export class SceneManager {
       }
     }
 
-    await this.dissolveTransition(Math.max(40, Math.min(durationMs, 3000)));
+    await this.dissolveTransition(
+      Math.max(40, Math.min(durationMs, 3000)),
+      oldTex,
+    );
   }
 
-  private async dissolveTransition(durationMs: number): Promise<void> {
+  private async dissolveTransition(
+    durationMs: number,
+    oldTex: RenderTexture | null,
+  ): Promise<void> {
+    if (oldTex) {
+      const oldSprite = new Sprite(oldTex);
+      this.stage.layers.overlay.addChild(oldSprite);
+      await this.tween(durationMs, (p) => {
+        oldSprite.alpha = 1 - p;
+      });
+      this.stage.layers.overlay.removeChild(oldSprite);
+      oldSprite.destroy();
+      oldTex.destroy(true);
+      return;
+    }
+
     if (!this.currentBgNode) {
       return;
     }
@@ -997,9 +746,28 @@ export class SceneManager {
   private async imageDissolveTransition(
     maskPath: string,
     durationMs: number,
+    ramplen: number,
+    oldTex: RenderTexture | null,
   ): Promise<void> {
     const tex = await this.assets.loadTexture(maskPath);
-    const filter = new ImageDissolveFilter(tex, 0.25, false);
+    const rampFrac = ramplen / 256.0;
+
+    if (oldTex) {
+      const oldSprite = new Sprite(oldTex);
+      const filter = new ImageDissolveFilter(tex, rampFrac, true);
+      filter.progress = 1;
+      oldSprite.filters = [filter];
+      this.stage.layers.overlay.addChild(oldSprite);
+      await this.tween(durationMs, (p) => {
+        filter.progress = 1 - p;
+      });
+      this.stage.layers.overlay.removeChild(oldSprite);
+      oldSprite.destroy();
+      oldTex.destroy(true);
+      return;
+    }
+
+    const filter = new ImageDissolveFilter(tex, rampFrac, false);
     this.stage.layers.background.filters = [filter];
     await this.tween(durationMs, (p) => {
       filter.progress = p;
@@ -1011,22 +779,42 @@ export class SceneManager {
     maskPath: string,
     wipeMs: number,
     holdMs: number,
+    ramplen: number,
+    oldTex: RenderTexture | null,
   ): Promise<void> {
     const tex = await this.assets.loadTexture(maskPath);
+    const rampFrac = ramplen / 256.0;
+
+    let oldSprite: Sprite | null = null;
+    if (oldTex) {
+      oldSprite = new Sprite(oldTex);
+      this.stage.layers.overlay.addChild(oldSprite);
+    }
+
     const curtain = new Graphics();
     curtain.rect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
     curtain.fill({ color: 0x000000, alpha: 1 });
-    const filterIn = new ImageDissolveFilter(tex, 0.25, false);
+    const filterIn = new ImageDissolveFilter(tex, rampFrac, false);
     curtain.filters = [filterIn];
     this.stage.layers.overlay.addChild(curtain);
 
     await this.tween(wipeMs, (p) => {
       filterIn.progress = p;
     });
+
+    if (oldSprite) {
+      this.stage.layers.overlay.removeChild(oldSprite);
+      oldSprite.destroy();
+      oldTex?.destroy(true);
+    }
+
     if (holdMs > 0) {
+      curtain.filters = [];
       await this.pauseMs(holdMs);
     }
-    const filterOut = new ImageDissolveFilter(tex, 0.25, true);
+
+    const filterOut = new ImageDissolveFilter(tex, rampFrac, true);
+    filterOut.progress = 1;
     curtain.filters = [filterOut];
     await this.tween(wipeMs, (p) => {
       filterOut.progress = 1 - p;
@@ -1040,7 +828,16 @@ export class SceneManager {
     inMs: number,
     holdMs: number,
     outMs: number,
+    oldTex: RenderTexture | null,
   ): Promise<void> {
+    let oldSprite: Sprite | null = null;
+    if (oldTex && inMs > 0) {
+      oldSprite = new Sprite(oldTex);
+      this.stage.layers.overlay.addChild(oldSprite);
+    } else {
+      oldTex?.destroy(true);
+    }
+
     const veil = new Graphics();
     veil.rect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
     veil.fill({ color: 0x000000, alpha: 1 });
@@ -1052,6 +849,12 @@ export class SceneManager {
         veil.alpha = p;
       });
     }
+    if (oldSprite) {
+      this.stage.layers.overlay.removeChild(oldSprite);
+      oldSprite.destroy();
+      oldTex?.destroy(true);
+    }
+
     if (holdMs > 0) {
       await this.pauseMs(holdMs);
     }
@@ -1063,6 +866,13 @@ export class SceneManager {
 
     this.stage.layers.overlay.removeChild(veil);
     veil.destroy();
+  }
+
+  private atNamesToSteps(atTransforms: string[]): AtlStatement[] {
+    return atTransforms.map((raw) => ({
+      type: "step",
+      expressions: [{ expr: raw.trim(), with: null }],
+    }));
   }
 
   private pauseMs(ms: number): Promise<void> {

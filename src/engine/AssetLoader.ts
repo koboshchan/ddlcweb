@@ -11,7 +11,13 @@ import {
   Ticker,
   TilingSprite,
 } from "pixi.js";
-import type { GameManifest, ImageDef, PyExprNode } from "../types/game-data";
+import type {
+  GameManifest,
+  ImageDef,
+  PyExprNode,
+  TransformDef,
+} from "../types/game-data";
+import { AtlRunner, evaluateAtlNumber } from "./AtlRunner";
 import { AnimatedMaskFilter, createBloodEmitter } from "./SpecialEffects";
 import { LOGICAL_HEIGHT, LOGICAL_WIDTH } from "./Stage";
 
@@ -32,6 +38,8 @@ export class AssetLoader {
   private readonly imageDefs: Record<string, ImageDef>;
   private readonly textureCache = new Map<string, Texture>();
   private fontsLoaded = false;
+  private transformDefs: Record<string, TransformDef> = {};
+  private evalExprFn?: (expr: string) => number;
 
   public constructor(
     private readonly manifest: GameManifest,
@@ -39,6 +47,14 @@ export class AssetLoader {
   ) {
     this.fileSet = new Set(manifest.gameFiles);
     this.imageDefs = imageDefs;
+  }
+
+  public setAtlConfig(
+    transformDefs: Record<string, TransformDef>,
+    evalExpr?: (expr: string) => number,
+  ): void {
+    this.transformDefs = transformDefs;
+    this.evalExprFn = evalExpr;
   }
 
   public resolveGamePath(rawPath: string): string | null {
@@ -324,10 +340,31 @@ export class AssetLoader {
       }
 
       case "atl": {
+        const container = new Container({ label: `atl:${nameHint || "anon"}` });
         if (def.preview) {
-          return this.buildFromDef(def.preview, ctx);
+          const previewNode = await this.buildFromDef(def.preview, ctx);
+          container.addChild(previewNode);
         }
-        return new Container();
+        if (ctx.ticker && def.steps.length > 0) {
+          const bounds = container.getLocalBounds();
+          const runner = new AtlRunner(
+            container,
+            {
+              assets: this,
+              ticker: ctx.ticker,
+              transformDefs: this.transformDefs,
+              evalExpr: (expr, locals) =>
+                evaluateAtlNumber(expr, locals, this.evalExprFn),
+            },
+            undefined,
+            {
+              width: bounds.width > 0 ? bounds.width : LOGICAL_WIDTH,
+              height: bounds.height > 0 ? bounds.height : LOGICAL_HEIGHT,
+            },
+          );
+          runner.start(def.steps, "show");
+        }
+        return container;
       }
 
       default: {
@@ -371,24 +408,23 @@ export class AssetLoader {
       }
     } else if (nameHint === "credits_header") {
       fontFamily = "RifficFree-Bold";
-      fontSize = 28;
-      fill = "#ffbde1";
-      strokeColor = "#662244";
-      strokeWidth = 3;
+      fontSize = 36;
+      fill = "#ffaae6";
+      strokeWidth = 0;
       align = "center";
       ypos = -40;
     } else if (nameHint === "credits_text") {
-      fontFamily = "Aller_Rg";
-      fontSize = 24;
+      fontFamily = "Halogen";
+      fontSize = 36;
       fill = "#ffffff";
-      strokeColor = "#000000";
-      strokeWidth = 2;
+      strokeWidth = 0;
       align = "center";
       ypos = 40;
     } else if (nameHint === "monika_credits_text") {
       fontFamily = "m1";
-      fontSize = 34;
-      fill = "#000000";
+      fontSize = 40;
+      fill = "#ffffff";
+      strokeWidth = 0;
       align = "center";
     } else if (nameHint === "splash_warning") {
       fontFamily = "Aller_Rg";

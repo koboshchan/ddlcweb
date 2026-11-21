@@ -350,6 +350,15 @@ export class ScriptVM {
     switch (stmt.type) {
       case "say": {
         const s = stmt as Extract<ScriptStatement, { type: "say" }>;
+        if (s.attributes && s.attributes.length > 0 && s.who) {
+          const charDef = this.deps.characters[s.who];
+          const imageTag = charDef?.kwargs?.image;
+          if (typeof imageTag === "string" && this.deps.scene.hasSprite(imageTag)) {
+            await this.deps.scene.show(`${imageTag} ${s.attributes.join(" ")}`, [], {
+              tag: imageTag,
+            });
+          }
+        }
         const speaker = this.resolveSpeaker(s.who);
         const text = this.interpolateText(s.what);
         const lineKey = `${frame.labelName}:${s.line}:${frame.index - 1}`;
@@ -374,8 +383,10 @@ export class ScriptVM {
         await this.deps.dialogue.showLine(speaker, text, interact, wasSeen);
         this.deps.persistence.markLineSeen(lineKey);
 
-        if (s.with) {
+        if (s.with && !this.deps.dialogue.isSkipping()) {
           await this.deps.scene.runTransition(s.with);
+        } else {
+          this.deps.scene.markTransitionCheckpoint();
         }
         return "continue";
       }
@@ -421,12 +432,16 @@ export class ScriptVM {
 
       case "showLayer": {
         const s = stmt as Extract<ScriptStatement, { type: "showLayer" }>;
-        this.deps.scene.showLayer(s.layer, s.at);
+        this.deps.scene.showLayer(s.layer, s.at, s.atl);
         return "continue";
       }
 
       case "with": {
         const s = stmt as Extract<ScriptStatement, { type: "with" }>;
+        if (this.deps.dialogue.isSkipping()) {
+          this.deps.scene.markTransitionCheckpoint();
+          return "continue";
+        }
         let resolvedMs: number | undefined;
         if (s.exprAst && s.expr?.startsWith("Dissolve")) {
           const val = await this.py.evalExpr(s.exprAst);
