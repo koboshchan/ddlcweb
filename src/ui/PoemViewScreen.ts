@@ -11,7 +11,6 @@ export class PoemViewScreen {
   private readonly paperEl: HTMLDivElement;
   private readonly titleEl: HTMLDivElement;
   private readonly bodyEl: HTMLDivElement;
-  private readonly dismissHintEl: HTMLDivElement;
   private dismissResolver: (() => void) | null = null;
 
   public constructor(
@@ -37,12 +36,7 @@ export class PoemViewScreen {
     viewport.appendChild(this.bodyEl);
     this.paperEl.appendChild(viewport);
 
-    this.dismissHintEl = document.createElement("div");
-    this.dismissHintEl.className = "ddlc-poem-dismiss is-hidden";
-    this.dismissHintEl.style.backgroundImage = `url("${this.assets.getAssetUrl("gui/poem_dismiss.png")}")`;
-
     this.root.appendChild(this.paperEl);
-    this.root.appendChild(this.dismissHintEl);
 
     this.root.addEventListener("click", () => {
       if (this.dismissResolver) {
@@ -58,14 +52,16 @@ export class PoemViewScreen {
   public show(
     poem: PoemDef,
     paper = "paper",
-    showDismissHint = false,
+    _showDismissHint = false,
   ): void {
     const paperPath =
-      paper === "paper_y1" || paper === "gui/poem_y1.jpg"
-        ? "gui/poem_y1.jpg"
-        : paper === "paper_y2" || paper === "gui/poem_y2.jpg"
-          ? "gui/poem_y2.jpg"
-          : "gui/poem.jpg";
+      paper === "paper_y1" || paper === "images/bg/poem_y1.jpg"
+        ? "images/bg/poem_y1.jpg"
+        : paper === "paper_y2" || paper === "images/bg/poem_y2.jpg"
+          ? "images/bg/poem_y2.jpg"
+          : paper === "paper_glitch" || paper === "images/bg/poem-glitch1.png"
+            ? "images/bg/poem-glitch1.png"
+            : "images/bg/poem.jpg";
 
     this.paperEl.style.backgroundImage = `url("${this.assets.getAssetUrl(paperPath)}")`;
 
@@ -89,7 +85,6 @@ export class PoemViewScreen {
     this.bodyEl.textContent = poem.text;
     this.paperEl.scrollTop = 0;
 
-    this.dismissHintEl.classList.toggle("is-hidden", !showDismissHint);
     this.root.classList.remove("is-hidden");
   }
 

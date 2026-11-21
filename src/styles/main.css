@@ -407,7 +407,7 @@ body {
 .ddlc-poem-layer {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: transparent;
   pointer-events: auto;
   z-index: 45;
   cursor: pointer;
@@ -415,14 +415,15 @@ body {
 
 .ddlc-poem-paper {
   position: absolute;
-  left: 280px;
+  left: 240px;
   top: 0;
-  width: 720px;
+  width: 800px;
   height: 720px;
-  background-size: 100% 100%;
+  background-size: 800px 720px;
+  background-position: center top;
   background-repeat: no-repeat;
   overflow-y: auto;
-  padding: 40px 56px 56px 56px;
+  padding: 40px 56px 100px 56px;
 }
 
 .ddlc-poem-viewport {
