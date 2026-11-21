@@ -25,6 +25,21 @@ import { PoemViewScreen } from "./ui/PoemViewScreen";
 import { TitleScreen } from "./ui/TitleScreen";
 import { VirtualFilesDrawer } from "./ui/VirtualFilesDrawer";
 
+const ACT2_SPLASH_MESSAGES = [
+  "You are my sunshine,\nMy only sunshine",
+  "I missed you.",
+  "Play with me",
+  "It's just a game, mostly.",
+  "This game is not suitable for children\nor those who are easily disturbed?",
+  "sdfasdklfgsdfgsgorcs",
+  "null",
+  "I have granted kids to hell",
+  "PM died for this.",
+  "It was only partially your fault.",
+  "This game is not suitable for children\nor those who are easily dismembered.",
+  "Don't forget to backup Monika's character file.",
+];
+
 async function runIntroSplash(
   scene: SceneManager,
   modals: ModalScreens,
@@ -37,11 +52,30 @@ async function runIntroSplash(
     persistence.savePersistent();
   }
 
-  // Team Salvato splash (`bg/splash.png`)
+  // Team Salvato splash (`bg/splash.png`, 0.5s in, 2.5s hold, 0.5s out)
+  await scene.setScene("white");
   await scene.setScene("bg/splash.png");
   await scene.runTransition("Dissolve(0.5, alpha=True)");
-  await new Promise((r) => window.setTimeout(r, 1200));
+  await new Promise((r) => window.setTimeout(r, 2500));
   await scene.setScene("white");
+  await scene.runTransition("Dissolve(0.5, alpha=True)");
+
+  // Content warning splash (`splash_warning`, 0.5s in, 2.0s hold, 0.5s out)
+  let warningText =
+    "This game is not suitable for children\nor those who are easily disturbed.";
+  if (
+    persistence.data.playthrough === 2 &&
+    Math.floor(Math.random() * 4) === 0
+  ) {
+    warningText =
+      ACT2_SPLASH_MESSAGES[
+        Math.floor(Math.random() * ACT2_SPLASH_MESSAGES.length)
+      ];
+  }
+  await scene.show("splash_warning", [], { paramText: warningText });
+  await scene.runTransition("Dissolve(0.5, alpha=True)");
+  await new Promise((r) => window.setTimeout(r, 2000));
+  await scene.hide("splash_warning");
   await scene.runTransition("Dissolve(0.5, alpha=True)");
 
   // `s_kill_early` easter egg: if sayori.chr is missing at the start of Act 1

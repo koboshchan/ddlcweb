@@ -3,16 +3,19 @@ import type { AudioEngine } from "../engine/AudioEngine";
 import type { Persistence } from "../engine/Persistence";
 import { glitchtext, type PyRuntime } from "../engine/PyRuntime";
 import type { SceneManager } from "../engine/SceneManager";
+import { easein_quad, easeout_quad } from "../engine/warpers";
 import type { PoemWordEntry } from "../types/game-data";
 import type { DialogueOverlay } from "./DialogueOverlay";
 import type { ModalScreens } from "./ModalScreens";
 
 interface StickerState {
   id: "s" | "n" | "y" | "m";
-  el: HTMLDivElement;
+  el: HTMLImageElement;
   idleUrl: string;
   hopUrl: string;
-  baseX: number;
+  xcenter: number;
+  yalign: number;
+  imgHeight: number;
   xOffset: number;
   dir: number;
   flipX: number;
@@ -324,49 +327,62 @@ export class PoemGameScreen {
       id: "s" | "n" | "y" | "m",
       idlePath: string,
       hopPath: string,
-      baseX: number,
-      bottomPx = 42,
+      xcenter: number,
+      yalign = 0.9,
     ): void => {
-      const el = document.createElement("div");
+      const el = document.createElement("img");
       el.className = "ddlc-sticker";
-      el.style.left = `${baseX}px`;
-      el.style.bottom = `${bottomPx}px`;
-      const idleUrl = `url("${this.assets.getAssetUrl(idlePath)}")`;
-      const hopUrl = `url("${this.assets.getAssetUrl(hopPath)}")`;
-      el.style.backgroundImage = idleUrl;
+      el.alt = "";
+      el.draggable = false;
+      const idleUrl = this.assets.getAssetUrl(idlePath);
+      const hopUrl = this.assets.getAssetUrl(hopPath);
+      el.src = idleUrl;
+      el.style.left = `${xcenter}px`;
+      const defaultH = 173;
+      el.style.top = `${(720 - defaultH) * yalign}px`;
       this.stickerStageEl.appendChild(el);
 
-      this.stickers.push({
+      const state: StickerState = {
         id,
         el,
         idleUrl,
         hopUrl,
-        baseX,
+        xcenter,
+        yalign,
+        imgHeight: defaultH,
         xOffset: 0,
         dir: 0,
         flipX: 1,
-        nextMoveAt: performance.now() + 2000 + Math.random() * 4000,
+        nextMoveAt: performance.now() + 4000 + Math.random() * 4000,
         moveEndAt: 0,
         hoppingUntil: 0,
+      };
+      el.addEventListener("load", () => {
+        if (el.naturalHeight > 0) {
+          state.imgHeight = el.naturalHeight;
+          el.style.top = `${(720 - state.imgHeight) * yalign}px`;
+        }
       });
+      this.stickers.push(state);
     };
 
     if (pt === 0) {
-      mkSticker("s", "gui/poemgame/s_sticker_1.png", "gui/poemgame/s_sticker_2.png", 100);
-      mkSticker("n", "gui/poemgame/n_sticker_1.png", "gui/poemgame/n_sticker_2.png", 220);
-      mkSticker("y", "gui/poemgame/y_sticker_1.png", "gui/poemgame/y_sticker_2.png", 340);
+      mkSticker("s", "gui/poemgame/s_sticker_1.png", "gui/poemgame/s_sticker_2.png", 100, 0.9);
+      mkSticker("n", "gui/poemgame/n_sticker_1.png", "gui/poemgame/n_sticker_2.png", 220, 0.9);
+      mkSticker("y", "gui/poemgame/y_sticker_1.png", "gui/poemgame/y_sticker_2.png", 340, 0.9);
     } else if (pt !== 3) {
-      mkSticker("n", "gui/poemgame/n_sticker_1.png", "gui/poemgame/n_sticker_2.png", 220);
+      mkSticker("n", "gui/poemgame/n_sticker_1.png", "gui/poemgame/n_sticker_2.png", 220, 0.9);
       if (pt === 2 && chapter === 2) {
         mkSticker(
           "y",
           "gui/poemgame/y_sticker_cut_1.png",
           "gui/poemgame/y_sticker_cut_2.png",
           340,
+          0.9,
         );
-        mkSticker("m", "gui/poemgame/m_sticker_1.png", "gui/poemgame/m_sticker_2.png", 100, -180);
+        mkSticker("m", "gui/poemgame/m_sticker_1.png", "gui/poemgame/m_sticker_2.png", 100, 1.35);
       } else {
-        mkSticker("y", "gui/poemgame/y_sticker_1.png", "gui/poemgame/y_sticker_2.png", 340);
+        mkSticker("y", "gui/poemgame/y_sticker_1.png", "gui/poemgame/y_sticker_2.png", 340, 0.9);
       }
     }
   }
@@ -374,11 +390,14 @@ export class PoemGameScreen {
   private setGlitchStickerMode(): void {
     this.stickerStageEl.innerHTML = "";
     this.stickers = [];
-    const el = document.createElement("div");
+    const el = document.createElement("img");
     el.className = "ddlc-sticker";
+    el.alt = "";
+    el.draggable = false;
+    el.src = this.assets.getAssetUrl("gui/poemgame/y_sticker_1_broken.png");
     el.style.left = "50px";
-    el.style.bottom = "-40px";
-    el.style.backgroundImage = `url("${this.assets.getAssetUrl("gui/poemgame/y_sticker_1_broken.png")}")`;
+    el.style.top = `${(720 - 159) * 1.8}px`;
+    el.style.transform = "translate(-50%, 0) scale(3)";
     this.stickerStageEl.appendChild(el);
   }
 
@@ -388,13 +407,14 @@ export class PoemGameScreen {
       return;
     }
     st.hoppingUntil = performance.now() + 720;
-    st.el.style.backgroundImage = st.hopUrl;
-    if (id === "m") {
-      st.el.style.bottom = "42px";
-      window.setTimeout(() => {
-        st.el.style.bottom = "-180px";
-      }, 720);
+    st.el.src = st.hopUrl;
+  }
+
+  private evalStickerBounce(progress: number, peakPx: number): number {
+    if (progress < 0.5) {
+      return -peakPx * easein_quad(progress * 2);
     }
+    return -peakPx * (1 - easeout_quad((progress - 0.5) * 2));
   }
 
   private startStickerLoop(): void {
@@ -404,27 +424,39 @@ export class PoemGameScreen {
         if (now < st.hoppingUntil) {
           const p = 1 - (st.hoppingUntil - now) / 720;
           const bouncePhase = (p * 2) % 1;
-          hopY = -Math.sin(bouncePhase * Math.PI) * 80;
-        } else {
-          st.el.style.backgroundImage = st.idleUrl;
+          hopY = this.evalStickerBounce(bouncePhase, 80);
+        } else if (st.el.src !== st.idleUrl) {
+          st.el.src = st.idleUrl;
         }
 
         if (now >= st.nextMoveAt && st.moveEndAt === 0) {
-          st.dir = Math.floor(Math.random() * 3) - 1;
+          if (st.dir > 0) {
+            st.dir = Math.random() < 0.5 ? -1 : 0;
+          } else if (st.dir < 0) {
+            st.dir = Math.random() < 0.5 ? 0 : 1;
+          } else {
+            st.dir = Math.floor(Math.random() * 3) - 1;
+          }
+          if (st.xOffset * st.dir > 5) {
+            st.dir *= -1;
+          }
           st.moveEndAt = now + 160;
         }
+        let moveY = 0;
         if (st.moveEndAt > 0) {
           if (now < st.moveEndAt) {
-            st.xOffset += st.dir * 0.45;
+            const p = 1 - (st.moveEndAt - now) / 160;
+            moveY = this.evalStickerBounce(p, 15);
+            st.xOffset += 0.16 * 10 * st.dir * 0.25;
             if (st.dir > 0) st.flipX = -1;
             else if (st.dir < 0) st.flipX = 1;
           } else {
             st.moveEndAt = 0;
-            st.nextMoveAt = now + 3000 + Math.random() * 4000;
+            st.nextMoveAt = now + 4000 + Math.random() * 4000;
           }
         }
 
-        st.el.style.transform = `translate(${st.xOffset}px, ${hopY}px) scaleX(${st.flipX})`;
+        st.el.style.transform = `translate(calc(-50% + ${st.xOffset}px), ${hopY + moveY}px) scaleX(${st.flipX})`;
       }
       this.rafId = requestAnimationFrame(loop);
     };

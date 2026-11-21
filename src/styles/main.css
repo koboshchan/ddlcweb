@@ -226,18 +226,20 @@ body {
   height: 18px;
   background-repeat: no-repeat;
   background-size: contain;
-  animation: ddlc-ctc-bob 0.8s ease-in-out infinite;
+  animation: ddlc-ctc-bob 1.5s infinite;
 }
 
 @keyframes ddlc-ctc-bob {
   0%,
   100% {
-    transform: translateY(0);
-    opacity: 0.9;
+    transform: translateX(-5px);
+    opacity: 0.5;
+    animation-timing-function: cubic-bezier(0.37, 0, 0.63, 1);
   }
   50% {
-    transform: translateY(4px);
+    transform: translateX(0);
     opacity: 1;
+    animation-timing-function: cubic-bezier(0.37, 0, 0.63, 1);
   }
 }
 
@@ -546,11 +548,9 @@ body {
 
 .ddlc-sticker {
   position: absolute;
-  width: 160px;
-  height: 160px;
-  background-repeat: no-repeat;
-  background-position: center bottom;
-  background-size: contain;
+  display: block;
+  transform-origin: center bottom;
+  pointer-events: none;
 }
 
 /* --- Game Menu (`Save`, `Load`, `History`, `Settings`, `About`) --- */
@@ -565,8 +565,11 @@ body {
 
 .ddlc-gamemenu-bg {
   position: absolute;
-  inset: -200px;
-  background-repeat: repeat;
+  left: 0;
+  top: 0;
+  width: 1380px;
+  height: 1320px;
+  background-repeat: no-repeat;
   animation: ddlc-menubg-scroll 3s linear infinite;
 }
 

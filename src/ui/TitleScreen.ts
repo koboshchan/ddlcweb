@@ -4,12 +4,17 @@ import {
   Graphics,
   Sprite,
   Ticker,
-  TilingSprite,
 } from "pixi.js";
 import type { AssetLoader } from "../engine/AssetLoader";
 import type { AudioEngine } from "../engine/AudioEngine";
 import type { Persistence } from "../engine/Persistence";
-import { easeCubic, easeInBounce, easeInQuint } from "../engine/SceneManager";
+import {
+  ease,
+  ease_cubic,
+  easein_bounce,
+  easein_quint,
+  easeout,
+} from "../engine/warpers";
 import { LOGICAL_HEIGHT, LOGICAL_WIDTH, type Stage } from "../engine/Stage";
 
 interface CastMemberConfig {
@@ -22,8 +27,8 @@ interface CastMemberConfig {
 
 interface ActiveParticle {
   sprite: Sprite;
-  vx: number;
-  vy: number;
+  xSpeed: number;
+  ySpeed: number;
   age: number;
   life: number;
 }
@@ -85,7 +90,7 @@ export class TitleScreen {
         xcenter: 470,
         ycenter: 600,
         z: 0.8,
-        z2: 0.68,
+        z2: 0.8,
       });
     } else {
       list.push({
@@ -131,17 +136,14 @@ export class TitleScreen {
         ...castConfig.map((cfg) => this.assets.loadTexture(cfg.texturePath)),
       ]);
 
-    const bgTile = new TilingSprite({
-      texture: bgTex,
-      width: LOGICAL_WIDTH + 256,
-      height: LOGICAL_HEIGHT + 768,
-    });
+    const bgSprite = new Sprite(bgTex);
+    bgSprite.position.set(0, ghost ? -500 : 0);
     if (ghost) {
       const bw = new ColorMatrixFilter();
       bw.desaturate();
-      bgTile.filters = [bw];
+      bgSprite.filters = [bw];
     }
-    this.root.addChild(bgTile);
+    this.root.addChild(bgSprite);
 
     const castSprites: Array<{ sprite: Sprite; cfg: CastMemberConfig }> = [];
     for (let i = 0; i < castConfig.length; i++) {
@@ -204,16 +206,16 @@ export class TitleScreen {
       elapsed += dt;
 
       const scrollPx = ((elapsed % 3.0) / 3.0) * -100;
-      bgTile.tilePosition.set(scrollPx, scrollPx);
+      let bgBaseY = ghost ? -500 : 0;
 
       if (!ghost) {
         if (elapsed >= 0.65) {
           const bgProgress = Math.min(1, (elapsed - 0.65) / 2.5);
-          bgTile.position.y = -500 * easeCubic(bgProgress);
+          bgBaseY = -500 * ease_cubic(bgProgress);
         }
 
         if (elapsed < 0.75) {
-          whiteFlash.alpha = 1 - elapsed / 0.75;
+          whiteFlash.alpha = 1 - easeout(elapsed / 0.75);
         } else if (elapsed >= 2.481 && elapsed < 2.981) {
           const flashP = (elapsed - 2.481) / 0.5;
           whiteFlash.alpha = 0.4 * (1 - flashP);
@@ -230,9 +232,9 @@ export class TitleScreen {
           const yP = Math.max(0, Math.min(1, (elapsed - 1.0) / 1.75));
           const zxP = Math.max(0, Math.min(1, (elapsed - 1.75) / 1.5));
 
-          const curYOff = startYOff * (1 - easeCubic(yP));
-          const curXOff = startXOff * (1 - easeCubic(zxP));
-          const curZoom = startZoom + (cfg.z2 - startZoom) * easeCubic(zxP);
+          const curYOff = startYOff * (1 - ease(yP));
+          const curXOff = startXOff * (1 - ease(zxP));
+          const curZoom = startZoom + (cfg.z2 - startZoom) * ease(zxP);
 
           sprite.position.set(cfg.xcenter + curXOff, cfg.ycenter + curYOff);
           sprite.scale.set(curZoom);
@@ -240,41 +242,53 @@ export class TitleScreen {
 
         if (elapsed >= 1.5) {
           const navP = Math.min(1, (elapsed - 1.5) / 1.0);
-          navSprite.position.x = -500 * (1 - easeInQuint(navP));
+          navSprite.position.x = -500 * (1 - easein_quint(navP));
         }
 
         if (elapsed >= 1.925) {
           const logoP = Math.min(1, (elapsed - 1.925) / 1.5);
-          logoSprite.position.y = 120 - 300 * (1 - easeInBounce(logoP));
+          logoSprite.position.y = 120 - 300 * (1 - easein_bounce(logoP));
         }
 
         if (!particlesSpawned && elapsed >= 2.481) {
           particlesSpawned = true;
           for (let i = 0; i < 40; i++) {
+            const speed = Math.random();
             const angle = Math.random() * Math.PI * 2;
-            const speed = 60 + Math.random() * 180;
+            const xSpeed = speed * Math.cos(angle) * 3;
+            const ySpeed = speed * Math.sin(angle) * 3 - 1;
             const sp = new Sprite(particleTex);
-            sp.anchor.set(0.5);
-            sp.scale.set(0.45 + Math.random() * 0.55);
+            sp.position.set(xSpeed * 24, ySpeed * 24);
             particleLayer.addChild(sp);
             particles.push({
               sprite: sp,
-              vx: Math.cos(angle) * speed,
-              vy: Math.sin(angle) * speed,
+              xSpeed,
+              ySpeed,
               age: 0,
-              life: 1.4 + Math.random() * 0.6,
+              life: 2.0,
             });
           }
         }
 
-        for (const p of particles) {
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
           p.age += dt;
-          const lifeP = Math.min(1, p.age / p.life);
-          p.sprite.position.x += p.vx * dt;
-          p.sprite.position.y += p.vy * dt;
-          p.sprite.alpha = Math.max(0, 1 - lifeP);
+          if (p.age >= p.life) {
+            particleLayer.removeChild(p.sprite);
+            p.sprite.destroy();
+            particles.splice(i, 1);
+            continue;
+          }
+          p.sprite.position.set(
+            p.xSpeed * 120 * (p.age + 0.2),
+            p.ySpeed * 120 * (p.age + 0.2) + 240 * p.age * p.age,
+          );
+          const fadeP = Math.min(1, p.age / 1.5);
+          p.sprite.alpha = Math.max(0, 1 - easeout(fadeP));
         }
       }
+
+      bgSprite.position.set(scrollPx, bgBaseY + scrollPx);
     };
 
     this.tickFn = onTick;
@@ -345,11 +359,8 @@ export class TitleScreen {
       );
     } else {
       const pt = Number(this.persistence.data.playthrough ?? 0);
-      const newGameLabel = pt === 1 ? "glItChNew Game" : "New Game";
+      const newGameLabel = pt === 1 ? "ŔŗñĮ¼»ŧþŀÂŻŕěōì«" : "New Game";
       const newBtn = makeButton(newGameLabel, () => this.callbacks.onNewGame());
-      if (pt === 1) {
-        newBtn.textContent = "New Game";
-      }
       nav.appendChild(newBtn);
       nav.appendChild(makeButton("Load Game", () => this.callbacks.onLoadGame()));
       nav.appendChild(makeButton("Settings", () => this.callbacks.onSettings()));

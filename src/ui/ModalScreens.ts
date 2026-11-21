@@ -10,6 +10,7 @@ export class ModalScreens {
   private readonly skipBadgeEl: HTMLDivElement;
   private readonly notifyEl: HTMLDivElement;
   private notifyTimer: number | null = null;
+  private glitchInterval: number | null = null;
 
   public constructor(
     uiRoot: HTMLElement,
@@ -156,7 +157,14 @@ export class ModalScreens {
       if (glitched) {
         const glitchOverlay = document.createElement("div");
         glitchOverlay.className = "ddlc-confirm-glitch";
-        glitchOverlay.style.backgroundImage = `url("${this.assets.getAssetUrl("gui/overlay/confirm_glitch.png")}")`;
+        const frameA = `url("${this.assets.getAssetUrl("gui/overlay/confirm_glitch.png")}")`;
+        const frameB = `url("${this.assets.getAssetUrl("gui/overlay/confirm_glitch2.png")}")`;
+        let toggle = false;
+        glitchOverlay.style.backgroundImage = frameA;
+        this.glitchInterval = window.setInterval(() => {
+          toggle = !toggle;
+          glitchOverlay.style.backgroundImage = toggle ? frameB : frameA;
+        }, 20);
         this.layerEl.appendChild(glitchOverlay);
       }
 
@@ -226,6 +234,10 @@ export class ModalScreens {
   }
 
   private closeModal(): void {
+    if (this.glitchInterval !== null) {
+      window.clearInterval(this.glitchInterval);
+      this.glitchInterval = null;
+    }
     this.layerEl.classList.add("is-hidden");
     this.layerEl.innerHTML = "";
     this.onOpenChange?.(false);
