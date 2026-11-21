@@ -315,13 +315,25 @@ export class ScriptVM {
     }
   }
 
-  private async performJump(target: string): Promise<void> {
-    for (const f of this.callStack) {
-      if (f.scopeMap) {
+  /**
+   * Unwinds structural sub-block frames (`if`/`menu`/`while`/nested `label`)
+   * plus the enclosing subroutine/root frame (`blockPath.length === 0`), leaving
+   * outer `call` frames intact for subsequent `return` statements.
+   */
+  private popCurrentSubroutine(): void {
+    while (this.callStack.length > 0) {
+      const top = this.callStack.pop()!;
+      if (top.scopeMap) {
         this.py.popScope();
       }
+      if (top.blockPath.length === 0) {
+        break;
+      }
     }
-    this.callStack.length = 0;
+  }
+
+  private async performJump(target: string): Promise<void> {
+    this.popCurrentSubroutine();
 
     const found = await this.findLabelNode(target);
     if (found) {
@@ -585,10 +597,7 @@ export class ScriptVM {
       }
 
       case "return": {
-        const popped = this.callStack.pop();
-        if (popped?.scopeMap) {
-          this.py.popScope();
-        }
+        this.popCurrentSubroutine();
         return "continue";
       }
 
