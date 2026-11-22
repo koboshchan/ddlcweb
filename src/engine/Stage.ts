@@ -63,6 +63,7 @@ export class Stage {
   public readonly layers: StageLayers;
 
   private resizeHandler: (() => void) | null = null;
+  private rotateHintEl: HTMLElement | null = null;
 
   private constructor(
     app: Application,
@@ -119,6 +120,15 @@ export class Stage {
   }
 
   private bindResize(): void {
+    const appEl = this.frameEl.parentElement;
+    if (appEl) {
+      const hint = document.createElement("div");
+      hint.className = "ddlc-rotate-hint";
+      hint.textContent = "Rotate to landscape for larger text";
+      appEl.appendChild(hint);
+      this.rotateHintEl = hint;
+    }
+
     const updateScale = (): void => {
       const vw = window.innerWidth;
       const vh = window.innerHeight;
@@ -126,6 +136,9 @@ export class Stage {
       const scaleY = vh / LOGICAL_HEIGHT;
       const scale = Math.min(scaleX, scaleY);
       this.frameEl.style.transform = `scale(${scale})`;
+      const compact = scale < 0.4;
+      this.frameEl.classList.toggle("is-compact-scale", compact);
+      appEl?.classList.toggle("is-portrait-hint", compact && vw < vh);
     };
 
     updateScale();
@@ -164,6 +177,8 @@ export class Stage {
       window.removeEventListener("resize", this.resizeHandler);
       this.resizeHandler = null;
     }
+    this.rotateHintEl?.remove();
+    this.rotateHintEl = null;
     this.app.destroy(true);
   }
 }
