@@ -1,7 +1,46 @@
-import { Application, Container } from "pixi.js";
+import { Application, Container, type Ticker } from "pixi.js";
 
 export const LOGICAL_WIDTH = 1280;
 export const LOGICAL_HEIGHT = 720;
+
+/**
+ * Attaches a Pixi ticker listener to `container` and automatically unregisters it
+ * when `container` is destroyed or detached from the stage after being attached.
+ */
+export function bindTickerToContainer(
+  container: Container,
+  ticker: Ticker,
+  fn: (t: Ticker) => void,
+): void {
+  if (container.destroyed) {
+    return;
+  }
+  let wasAttached = Boolean(container.parent);
+  let active = true;
+  const cleanup = (): void => {
+    if (!active) {
+      return;
+    }
+    active = false;
+    ticker.remove(onTick);
+    container.off("destroyed", cleanup);
+  };
+  const onTick = (t: Ticker): void => {
+    if (!active || container.destroyed) {
+      cleanup();
+      return;
+    }
+    if (container.parent) {
+      wasAttached = true;
+    } else if (wasAttached) {
+      cleanup();
+      return;
+    }
+    fn(t);
+  };
+  container.once("destroyed", cleanup);
+  ticker.add(onTick);
+}
 
 export interface StageLayers {
   background: Container;
@@ -95,9 +134,15 @@ export class Stage {
   }
 
   public clearSceneLayers(): void {
-    this.layers.background.removeChildren();
-    this.layers.master.removeChildren();
-    this.layers.transient.removeChildren();
+    for (const layer of [
+      this.layers.background,
+      this.layers.master,
+      this.layers.transient,
+    ]) {
+      for (const child of layer.removeChildren()) {
+        child.destroy({ children: true });
+      }
+    }
   }
 
   public captureThumbnailDataUrl(width = 256, height = 144): string {

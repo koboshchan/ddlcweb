@@ -20,7 +20,11 @@ import type {
 } from "../types/game-data";
 import { AtlRunner, evaluateAtlNumber } from "./AtlRunner";
 import { AnimatedMaskFilter, createBloodEmitter } from "./SpecialEffects";
-import { LOGICAL_HEIGHT, LOGICAL_WIDTH } from "./Stage";
+import {
+  bindTickerToContainer,
+  LOGICAL_HEIGHT,
+  LOGICAL_WIDTH,
+} from "./Stage";
 
 const GAME_ASSETS_BASE = "./game-assets/game/";
 
@@ -332,11 +336,7 @@ export class AssetLoader {
 
         if (ctx.ticker && ctx.evalAst && def.branches.length > 1) {
           let switching = false;
-          const onTick = (): void => {
-            if (container.destroyed) {
-              ctx.ticker?.remove(onTick);
-              return;
-            }
+          bindTickerToContainer(container, ctx.ticker, () => {
             if (switching) {
               return;
             }
@@ -359,8 +359,7 @@ export class AssetLoader {
                   switching = false;
                 });
             }
-          };
-          ctx.ticker.add(onTick);
+          });
         }
 
         return container;
@@ -394,15 +393,10 @@ export class AssetLoader {
         child.filters = [filter];
         if (ctx.ticker) {
           let st = 0;
-          const onTick = (t: Ticker): void => {
-            if (child.destroyed) {
-              ctx.ticker?.remove(onTick);
-              return;
-            }
+          bindTickerToContainer(child, ctx.ticker, (t: Ticker) => {
             st += t.deltaMS / 1000;
             filter.update(st, def.oc, def.speed, def.frequency, def.amount);
-          };
-          ctx.ticker.add(onTick);
+          });
         }
         return child;
       }

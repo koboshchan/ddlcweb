@@ -246,6 +246,7 @@ export class AtlRunner {
   private baseChildNode: Container | null = null;
   private rootThread: TimelineThread | null = null;
   private tickFn: ((t: Ticker) => void) | null = null;
+  private destroyHook: (() => void) | null = null;
   private disposed = false;
   private wasAttached = false;
   private onComplete?: () => void;
@@ -316,11 +317,20 @@ export class AtlRunner {
       }
     };
     this.tickFn = tick;
+    const onDestroyed = (): void => {
+      this.stop();
+    };
+    this.destroyHook = onDestroyed;
+    this.node.once("destroyed", onDestroyed);
     this.ctx.ticker.add(tick);
   }
 
   public stop(): void {
     this.disposed = true;
+    if (this.destroyHook) {
+      this.node.off("destroyed", this.destroyHook);
+      this.destroyHook = null;
+    }
     if (this.tickFn) {
       this.ctx.ticker.remove(this.tickFn);
       this.tickFn = null;
@@ -329,6 +339,10 @@ export class AtlRunner {
   }
 
   private finish(): void {
+    if (this.destroyHook) {
+      this.node.off("destroyed", this.destroyHook);
+      this.destroyHook = null;
+    }
     if (this.tickFn) {
       this.ctx.ticker.remove(this.tickFn);
       this.tickFn = null;

@@ -11,7 +11,12 @@ import {
 } from "pixi.js";
 import type { AssetLoader } from "./AssetLoader";
 import type { AudioEngine } from "./AudioEngine";
-import { LOGICAL_HEIGHT, LOGICAL_WIDTH, type Stage } from "./Stage";
+import {
+  bindTickerToContainer,
+  LOGICAL_HEIGHT,
+  LOGICAL_WIDTH,
+  type Stage,
+} from "./Stage";
 
 const INVERT_VERTEX = `
 in vec2 aPosition;
@@ -350,6 +355,9 @@ export function createBloodEmitter(
   const density = 120;
 
   void assets.loadTexture("gui/blood_drop.png").then((tex) => {
+    if (container.destroyed) {
+      return;
+    }
     const spawnDrop = (vx: number, vy: number, x = 0, y = 0): void => {
       const sp = new Sprite(tex);
       sp.anchor.set(0.5);
@@ -381,11 +389,7 @@ export function createBloodEmitter(
       });
     }
 
-    const onTick = (t: Ticker): void => {
-      if (container.destroyed) {
-        ticker.remove(onTick);
-        return;
-      }
+    bindTickerToContainer(container, ticker, (t: Ticker) => {
       const dt = t.deltaMS / 1000;
       elapsed += dt;
       accum += dt * density;
@@ -423,8 +427,7 @@ export function createBloodEmitter(
         d.vy += gravity * dt;
         d.sprite.scale.set(0.75 * (1 - d.age / d.life));
       }
-    };
-    ticker.add(onTick);
+    });
   });
 
   return container;
@@ -465,14 +468,9 @@ export function createRectCluster(
   };
   randomize();
 
-  const onTick = (): void => {
-    if (container.destroyed) {
-      ticker.remove(onTick);
-      return;
-    }
+  bindTickerToContainer(container, ticker, () => {
     randomize();
-  };
-  ticker.add(onTick);
+  });
 
   return container;
 }
@@ -516,11 +514,7 @@ export function createRectStatic(
     });
   }
 
-  const onTick = (t: Ticker): void => {
-    if (container.destroyed) {
-      ticker.remove(onTick);
-      return;
-    }
+  bindTickerToContainer(container, ticker, (t: Ticker) => {
     elapsed += t.deltaMS / 1000;
     for (const item of items) {
       if (elapsed >= item.nextAt) {
@@ -531,8 +525,7 @@ export function createRectStatic(
         item.nextAt = elapsed + Math.random() * 0.4 + 0.1;
       }
     }
-  };
-  ticker.add(onTick);
+  });
 
   return container;
 }
