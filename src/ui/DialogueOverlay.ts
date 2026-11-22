@@ -596,8 +596,6 @@ export class DialogueOverlay {
 
   public hide(): void {
     this.clearTimers();
-    this.setSkipping(false);
-    this.setAutoForward(false);
     this.isTyping = false;
     this.advanceResolver = null;
     this.layerEl.classList.add("is-hidden");
@@ -606,6 +604,8 @@ export class DialogueOverlay {
   }
 
   public destroy(): void {
+    this.setSkipping(false);
+    this.setAutoForward(false);
     this.hide();
     if (this.keyDownHandler) {
       window.removeEventListener("keydown", this.keyDownHandler);
