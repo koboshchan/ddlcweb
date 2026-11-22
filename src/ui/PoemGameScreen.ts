@@ -419,7 +419,12 @@ export class PoemGameScreen {
   }
 
   private startStickerLoop(): void {
+    let lastNow: number | null = null;
     const loop = (now: number): void => {
+      const prevNow = lastNow ?? now;
+      const deltaMS = Math.min(Math.max(0, now - prevNow), 100);
+      const effectivePrev = now - deltaMS;
+      lastNow = now;
       for (const st of this.stickers) {
         let hopY = 0;
         if (now < st.hoppingUntil) {
@@ -445,10 +450,16 @@ export class PoemGameScreen {
         }
         let moveY = 0;
         if (st.moveEndAt > 0) {
+          const activeMs = Math.max(
+            0,
+            Math.min(now, st.moveEndAt) - Math.max(effectivePrev, st.moveEndAt - 160),
+          );
+          if (activeMs > 0) {
+            st.xOffset += (0.16 * 10 * st.dir * 0.25) * (activeMs / (1000 / 60));
+          }
           if (now < st.moveEndAt) {
             const p = 1 - (st.moveEndAt - now) / 160;
             moveY = this.evalStickerBounce(p, 15);
-            st.xOffset += 0.16 * 10 * st.dir * 0.25;
             if (st.dir > 0) st.flipX = -1;
             else if (st.dir < 0) st.flipX = 1;
           } else {
