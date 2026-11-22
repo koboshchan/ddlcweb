@@ -117,6 +117,109 @@ function splitArgs(raw: string): string[] {
   return out;
 }
 
+type CompiledAtlExpr = (
+  locals: Record<string, number>,
+  fallbackEval?: (expr: string) => number,
+) => number;
+
+const compiledAtlExprCache = new Map<string, CompiledAtlExpr>();
+const PLAIN_ATL_NUMBER_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+const SINGLE_ATL_IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+/**
+ * Compiles and caches a numeric Ren'Py ATL expression once per unique expression text.
+ */
+export function compileAtlNumber(expr: string): CompiledAtlExpr {
+  const trimmed = expr.trim();
+  const cached = compiledAtlExprCache.get(trimmed);
+  if (cached) {
+    return cached;
+  }
+
+  let compiled: CompiledAtlExpr;
+  if (!trimmed || trimmed === "False" || trimmed === "None") {
+    compiled = () => 0;
+  } else if (trimmed === "True") {
+    compiled = () => 1;
+  } else if (PLAIN_ATL_NUMBER_RE.test(trimmed)) {
+    const num = parseFloat(trimmed);
+    compiled = Number.isNaN(num) ? () => 0 : () => num;
+  } else if (SINGLE_ATL_IDENT_RE.test(trimmed)) {
+    compiled = (locals, fallbackEval) => {
+      if (trimmed in locals) {
+        return locals[trimmed];
+      }
+      if (fallbackEval) {
+        const val = fallbackEval(trimmed);
+        if (Number.isFinite(val)) {
+          return val;
+        }
+      }
+      return 0;
+    };
+  } else {
+    const ids: string[] = [];
+    const paramById = new Map<string, string>();
+    const body = trimmed.replace(/\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g, (id) => {
+      let param = paramById.get(id);
+      if (!param) {
+        param = `v${ids.length}`;
+        paramById.set(id, param);
+        ids.push(id);
+      }
+      return param;
+    });
+    const sanitizedCheck = trimmed.replace(/\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g, "0");
+
+    let fn: ((...args: number[]) => unknown) | null = null;
+    if (/^[0-9eE.+\-*/()\s]+$/.test(sanitizedCheck)) {
+      try {
+        const params = ids.map((id) => paramById.get(id)!);
+        fn = new Function(...params, `"use strict"; return (${body});`) as (
+          ...args: number[]
+        ) => unknown;
+      } catch {
+        fn = null;
+      }
+    }
+
+    if (fn) {
+      const compiledFn = fn;
+      compiled = (locals, fallbackEval) => {
+        const args = new Array<number>(ids.length);
+        for (let i = 0; i < ids.length; i++) {
+          const id = ids[i];
+          if (id in locals) {
+            args[i] = locals[id];
+          } else if (fallbackEval) {
+            const val = fallbackEval(id);
+            args[i] = Number.isFinite(val) ? val : NaN;
+          } else {
+            args[i] = NaN;
+          }
+        }
+        try {
+          const res = Number(compiledFn(...args));
+          if (Number.isFinite(res)) {
+            return res;
+          }
+        } catch {
+          // fall through
+        }
+        const parsed = parseFloat(trimmed);
+        return Number.isNaN(parsed) ? 0 : parsed;
+      };
+    } else {
+      const parsed = parseFloat(trimmed);
+      const fallback = Number.isNaN(parsed) ? 0 : parsed;
+      compiled = () => fallback;
+    }
+  }
+
+  compiledAtlExprCache.set(trimmed, compiled);
+  return compiled;
+}
+
 /**
  * Evaluates a numeric Ren'Py ATL expression using current locals + VM fallback.
  */
@@ -125,41 +228,7 @@ export function evaluateAtlNumber(
   locals: Record<string, number>,
   fallbackEval?: (expr: string) => number,
 ): number {
-  const trimmed = expr.trim();
-  if (!trimmed) {
-    return 0;
-  }
-  if (trimmed === "True") return 1;
-  if (trimmed === "False" || trimmed === "None") return 0;
-
-  let replaced = trimmed.replace(/\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g, (id) => {
-    if (id in locals) {
-      return String(locals[id]);
-    }
-    if (fallbackEval) {
-      const val = fallbackEval(id);
-      if (Number.isFinite(val)) {
-        return String(val);
-      }
-    }
-    return id;
-  });
-
-  // Safe arithmetic evaluation only on numbers/operators/parens
-  if (/^[0-9eE.+\-*/()\s]+$/.test(replaced)) {
-    try {
-      const fn = new Function(`return (${replaced});`) as () => unknown;
-      const res = Number(fn());
-      if (Number.isFinite(res)) {
-        return res;
-      }
-    } catch {
-      // fall through
-    }
-  }
-
-  const parsed = parseFloat(replaced);
-  return Number.isNaN(parsed) ? 0 : parsed;
+  return compileAtlNumber(expr)(locals, fallbackEval);
 }
 
 function isRelativePositionExpr(rawExpr: string, val: number): boolean {
@@ -702,19 +771,34 @@ export class AtlRunner {
     let activeSubThreads: TimelineThread[] | null = null;
     let functionPollWait = 0;
 
+    const blockCompiledExprs = new Map<string, CompiledAtlExpr>();
+    const evalNum = (raw: string): number => {
+      let fn = blockCompiledExprs.get(raw);
+      if (!fn) {
+        fn = compileAtlNumber(raw);
+        blockCompiledExprs.set(raw, fn);
+      }
+      return fn(locals, (e) => this.ctx.evalExpr(e, locals));
+    };
+
+    // Precompute `time T` checkpoints when the block starts instead of compiling every frame
+    const timeCheckpoints: Array<{ index: number; deadline: number }> = [];
+    for (let k = 0; k < statements.length; k++) {
+      if (statements[k].type === "time") {
+        const ts = statements[k] as Extract<AtlStatement, { type: "time" }>;
+        timeCheckpoints.push({ index: k, deadline: evalNum(ts.time) });
+      }
+    }
+
     // Find next `time T` checkpoint index after `idx` so preceding loops preempt on schedule
     const findNextTimeDeadline = (fromIndex: number): number | null => {
-      for (let k = fromIndex; k < statements.length; k++) {
-        if (statements[k].type === "time") {
-          const ts = statements[k] as Extract<AtlStatement, { type: "time" }>;
-          return evaluateAtlNumber(ts.time, locals, (e) => this.ctx.evalExpr(e, locals));
+      for (const cp of timeCheckpoints) {
+        if (cp.index >= fromIndex) {
+          return cp.deadline;
         }
       }
       return null;
     };
-
-    const evalNum = (raw: string): number =>
-      evaluateAtlNumber(raw, locals, (e) => this.ctx.evalExpr(e, locals));
 
     const applyPropertyImmediate = (prop: string, rawVal: string): void => {
       const s = this.state;
