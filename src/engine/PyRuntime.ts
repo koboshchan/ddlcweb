@@ -43,6 +43,7 @@ export interface PyRuntimeCallbacks {
   displayMenu: (items: Array<[string, unknown]>, interact?: boolean) => Promise<unknown>;
   setDialogueStyle: (styleName: string) => void;
   setQuickMenu: (visible: boolean) => void;
+  setAllowSkipping?: (allowed: boolean) => void;
   runPoemGame: () => Promise<void>;
 }
 
@@ -508,9 +509,22 @@ export class PyRuntime {
       game: { preferences: this.persistence.data.preferences },
       call_screen: async (
         name: string,
-        ...args: unknown[]
+        ...rawArgs: unknown[]
       ) => {
-        return this.callbacks.callScreen(name, args, {});
+        let posArgs = rawArgs;
+        let kwargs: Record<string, unknown> = {};
+        const last = rawArgs[rawArgs.length - 1];
+        if (
+          rawArgs.length > 0 &&
+          last !== null &&
+          typeof last === "object" &&
+          !Array.isArray(last) &&
+          !("author" in last && "title" in last)
+        ) {
+          posArgs = rawArgs.slice(0, -1);
+          kwargs = last as Record<string, unknown>;
+        }
+        return this.callbacks.callScreen(name, posArgs, kwargs);
       },
       display_menu: async (...callArgs: unknown[]) => {
         let items: Array<[string, unknown]> = [];
@@ -739,6 +753,12 @@ export class PyRuntime {
         (obj as Record<string, unknown>)[target.attr] = value;
         if (target.obj.t === "name" && target.obj.id === "persistent") {
           this.persistence.savePersistent();
+        } else if (
+          target.obj.t === "name" &&
+          target.obj.id === "config" &&
+          target.attr === "allow_skipping"
+        ) {
+          this.callbacks.setAllowSkipping?.(Boolean(value));
         }
       }
       return;

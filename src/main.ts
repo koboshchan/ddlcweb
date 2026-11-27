@@ -31,7 +31,7 @@ const ACT2_SPLASH_MESSAGES = [
   "Play with me",
   "It's just a game, mostly.",
   "This game is not suitable for children\nor those who are easily disturbed?",
-  "sdfasdklfgsdfgsgorcs",
+  "sdfasdklfgsdfgsgoinrfoenlvbd",
   "null",
   "I have granted kids to hell",
   "PM died for this.",
@@ -42,6 +42,7 @@ const ACT2_SPLASH_MESSAGES = [
 
 async function runIntroSplash(
   scene: SceneManager,
+  audio: AudioEngine,
   modals: ModalScreens,
   persistence: Persistence,
 ): Promise<void> {
@@ -49,6 +50,29 @@ async function runIntroSplash(
     await scene.setScene("white");
     await modals.showTermsOfService();
     persistence.data.first_run = true;
+    persistence.savePersistent();
+  }
+
+  // 1/64 Ghost Menu easter egg during Act 2 (matches `splash.rpy`: skips normal splash)
+  if (
+    persistence.data.playthrough === 2 &&
+    !persistence.data.seen_ghost_menu &&
+    Math.floor(Math.random() * 64) === 0
+  ) {
+    persistence.data.ghost_menu = true;
+    persistence.data.seen_ghost_menu = true;
+    persistence.savePersistent();
+    await scene.setScene("black");
+    void audio.play("music", "ghostmenu").catch(() => {});
+    await new Promise((r) => window.setTimeout(r, 1000));
+    await scene.show("end");
+    await scene.runTransition("dissolve_cg");
+    await new Promise((r) => window.setTimeout(r, 3000));
+    return;
+  }
+
+  if (persistence.data.ghost_menu) {
+    persistence.data.ghost_menu = false;
     persistence.savePersistent();
   }
 
@@ -77,22 +101,6 @@ async function runIntroSplash(
   await new Promise((r) => window.setTimeout(r, 2000));
   await scene.hide("splash_warning");
   await scene.runTransition("Dissolve(0.5, alpha=True)");
-
-  // `s_kill_early` easter egg: if sayori.chr is missing at the start of Act 1
-  if (persistence.data.playthrough === 0 && !persistence.data.seen_ghost_menu) {
-    // Check handled dynamically in splash/main menu
-  }
-
-  // 1/64 Ghost Menu easter egg during Act 2
-  if (
-    persistence.data.playthrough === 2 &&
-    !persistence.data.seen_ghost_menu &&
-    Math.floor(Math.random() * 64) === 0
-  ) {
-    persistence.data.ghost_menu = true;
-    persistence.data.seen_ghost_menu = true;
-    persistence.savePersistent();
-  }
 }
 
 async function bootstrap(): Promise<void> {
@@ -233,7 +241,10 @@ async function bootstrap(): Promise<void> {
     vfs,
     onReturnToTitle: returnToTitle,
     onRestartAtLabel: (label) => {
-      void startNewGameFlow(label);
+      audio.stopAll();
+      dialogue?.setSkipping(false);
+      dialogue?.setAutoForward(false);
+      void startNewGameFlow(label ?? "splashscreen");
     },
   });
 
@@ -313,6 +324,30 @@ async function bootstrap(): Promise<void> {
     onSettings: () => gameMenu?.open("settings", false),
     onAbout: () => gameMenu?.open("about", false),
     onOpenVirtualFiles: () => vfsDrawer.show(),
+    onExitGhostMenu: () => {
+      void (async () => {
+        titleScreen?.hide();
+        audio.stopAll();
+        await scene.setScene("white");
+        await scene.show("gui/menu_art_m_ghost.png", [], {
+          atl: [
+            {
+              type: "step",
+              properties: [
+                ["xpos", "-100"],
+                ["ypos", "-100"],
+                ["zoom", "3.5"],
+              ],
+            },
+          ],
+        });
+        await new Promise((r) => window.setTimeout(r, 150));
+        persistence.data.ghost_menu = false;
+        persistence.savePersistent();
+        scene.resetAllLayers();
+        await titleScreen?.show();
+      })();
+    },
   });
 
   // Check `s_kill_early` easter egg if sayori.chr was deleted before starting Act 1
@@ -321,18 +356,18 @@ async function bootstrap(): Promise<void> {
     !vfs.exists("characters/sayori.chr")
   ) {
     inGame = true;
-    await vm.runFromLabel("s_kill_early");
+    await vm.runFromLabel("splashscreen");
     return;
   }
 
-  // Resume `autoload` states (Act 3 Monika `ch30_autoload`, `credits`, `postcredits_loop`)
+  // Resume `autoload` states (Act 2 `yuri_kill_2`, Act 3 `ch30_autoload`, `credits`, `postcredits_loop`)
   if (persistence.data.autoload) {
     inGame = true;
-    await vm.runFromLabel(persistence.data.autoload);
+    await vm.runFromLabel("autoload");
     return;
   }
 
-  await runIntroSplash(scene, modals, persistence);
+  await runIntroSplash(scene, audio, modals, persistence);
   await titleScreen.show();
 }
 

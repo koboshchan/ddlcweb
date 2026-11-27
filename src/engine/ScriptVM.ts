@@ -88,6 +88,7 @@ export class ScriptVM {
         displayMenu: (items, interact = true) => this.handlePythonMenu(items, interact),
         setDialogueStyle: (styleName) => this.deps.dialogue.setDialogueStyle(styleName),
         setQuickMenu: (visible) => this.deps.dialogue.setQuickMenuVisible(visible),
+        setAllowSkipping: (allowed) => this.deps.dialogue.setAllowSkipping(allowed),
         runPoemGame: async () => {
           if (this.poemGame) {
             await this.poemGame.run();
@@ -116,6 +117,7 @@ export class ScriptVM {
     this.deps.dialogue.setDialogueStyle("normal");
     this.deps.dialogue.setQuickMenuVisible(true);
     this.deps.dialogue.setMonikaTextbox(false);
+    this.deps.dialogue.setAllowSkipping(true);
   }
 
   public stop(): void {
@@ -248,6 +250,10 @@ export class ScriptVM {
     this.skipNextHistoryAdd =
       Boolean(slot.history && slot.history.length > 0) &&
       topFrame?.statements[topFrame.index]?.type === "say";
+
+    if (slot.label !== "after_load") {
+      await this.pushLabelEntry("after_load");
+    }
 
     await this.runLoop(token);
   }
@@ -428,6 +434,7 @@ export class ScriptVM {
             /^ch30_(?:loop|\d+)$/.test(this.currentLabel)
           ) {
             this.deps.dialogue.setSkipping(false);
+            this.deps.dialogue.setAllowSkipping(false);
             this.deps.persistence.data.tried_skip = true;
             this.deps.persistence.savePersistent();
             await this.performJump("ch30_noskip");
@@ -788,6 +795,29 @@ export class ScriptVM {
     exprAst?: PyExprNode | null;
   }): { name: string; paramText?: string; def?: ImageDef } {
     if (imspec.exprAst) {
+      if (
+        imspec.exprAst.t === "call" &&
+        imspec.exprAst.fn.t === "name" &&
+        imspec.exprAst.fn.id === "Text"
+      ) {
+        const rawText = imspec.exprAst.args[0]
+          ? String(this.py.evalExprSync(imspec.exprAst.args[0]) ?? "")
+          : "";
+        const props: Record<string, unknown> = {};
+        for (const kw of imspec.exprAst.kwargs) {
+          props[kw.k] = this.py.evalExprSync(kw.v);
+        }
+        const styleName = typeof props.style === "string" ? props.style : "";
+        return {
+          name: styleName || "inline_text",
+          def: {
+            kind: "text",
+            parameterized: false,
+            text: this.interpolateText(rawText),
+            props,
+          },
+        };
+      }
       const evaluated = this.py.evalExprSync(imspec.exprAst);
       if (typeof evaluated === "string") {
         const unquoted = evaluated.replace(/^["']|["']$/g, "");
@@ -1109,16 +1139,51 @@ export class ScriptVM {
   }
 
   private interpolateText(raw: string): string {
-    return raw.replace(/\[([a-zA-Z0-9_.\[\]]+)\]/g, (_match, expr: string) => {
-      if (expr === "player") {
-        return String(this.py.getVar("player") || this.deps.persistence.data.playername || "MC");
+    return raw.replace(
+      /\[([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*|\[[a-zA-Z0-9_]+\])*)\]/g,
+      (_match, expr: string) => {
+        if (expr === "player") {
+          return String(
+            this.py.getVar("player") || this.deps.persistence.data.playername || "MC",
+          );
+        }
+        const val = this.resolveInterpolatedExpr(expr);
+        if (val === undefined || val === null) {
+          return `[${expr}]`;
+        }
+        return String(val);
+      },
+    );
+  }
+
+  private resolveInterpolatedExpr(expr: string): unknown {
+    const tokenRe = /^([a-zA-Z_][a-zA-Z0-9_]*)|\.([a-zA-Z_][a-zA-Z0-9_]*)|\[([a-zA-Z0-9_]+)\]/g;
+    let cur: unknown;
+    let first = true;
+    let match: RegExpExecArray | null;
+    while ((match = tokenRe.exec(expr)) !== null) {
+      if (first) {
+        first = false;
+        cur = this.py.getVar(match[1]);
+      } else if (match[2] !== undefined) {
+        if (cur && typeof cur === "object") {
+          cur = (cur as Record<string, unknown>)[match[2]];
+        } else {
+          return undefined;
+        }
+      } else if (match[3] !== undefined) {
+        const keyRaw = match[3];
+        const key = /^\d+$/.test(keyRaw) ? Number(keyRaw) : this.py.getVar(keyRaw);
+        if ((Array.isArray(cur) || typeof cur === "string") && typeof key === "number") {
+          cur = cur[key < 0 ? cur.length + key : key];
+        } else if (cur && typeof cur === "object" && key !== undefined && key !== null) {
+          cur = (cur as Record<string, unknown>)[String(key)];
+        } else {
+          return undefined;
+        }
       }
-      const val = this.py.getVar(expr);
-      if (val === undefined || val === null) {
-        return `[${expr}]`;
-      }
-      return String(val);
-    });
+    }
+    return cur;
   }
 
   private async loadScript(stem: string): Promise<ScriptFile> {

@@ -39,6 +39,7 @@ export interface TitleScreenCallbacks {
   onSettings: () => void;
   onAbout: () => void;
   onOpenVirtualFiles: () => void;
+  onExitGhostMenu?: () => void;
 }
 
 /**
@@ -351,6 +352,10 @@ export class TitleScreen {
     if (ghost) {
       nav.appendChild(
         makeButton("End", () => {
+          if (this.callbacks.onExitGhostMenu) {
+            this.callbacks.onExitGhostMenu();
+            return;
+          }
           this.persistence.data.ghost_menu = false;
           this.persistence.savePersistent();
           this.hide();

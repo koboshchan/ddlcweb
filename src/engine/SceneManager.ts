@@ -497,6 +497,7 @@ export class SceneManager {
       !trimmed.startsWith("credits_") &&
       !trimmed.startsWith("poem_");
 
+    const isCenteredPoem = !hasExplicitTransform && trimmed.startsWith("poem_");
     let startState: Partial<AtlState>;
     if (prevState) {
       startState = prevState;
@@ -511,6 +512,18 @@ export class SceneManager {
         yanchor: 1.0,
         yanchorRel: true,
         zoom: CHARACTER_BASE_SCALE,
+        alpha: 1,
+      };
+    } else if (isCenteredPoem) {
+      startState = {
+        xpos: 0.5,
+        xposRel: true,
+        xanchor: 0.5,
+        xanchorRel: true,
+        ypos: 1.0,
+        yposRel: true,
+        yanchor: 1.0,
+        yanchorRel: true,
         alpha: 1,
       };
     } else {
@@ -577,7 +590,7 @@ export class SceneManager {
         baseWidth,
         baseHeight,
       );
-    } else if (isCharacter && !hasExplicitTransform) {
+    } else if ((isCharacter && !hasExplicitTransform) || isCenteredPoem) {
       syncStateToNode(
         node,
         (node.children[0] as Container) ?? node,

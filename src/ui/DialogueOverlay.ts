@@ -29,6 +29,7 @@ export class DialogueOverlay {
   private readonly choiceEl: HTMLDivElement;
 
   private advanceResolver: (() => void) | null = null;
+  private clearWaitListeners: (() => void) | null = null;
   private isTyping = false;
   private fullSpans: TextSpan[] = [];
   private typeTimer: number | null = null;
@@ -39,6 +40,7 @@ export class DialogueOverlay {
   private monikaTextbox = false;
   private windowsHidden = false;
   private skipping = false;
+  private allowSkipping = true;
   private autoForward = false;
   private currentLineSeen = false;
   private interactiveChoiceOpen = false;
@@ -202,7 +204,17 @@ export class DialogueOverlay {
     }
   }
 
+  public setAllowSkipping(allowed: boolean): void {
+    this.allowSkipping = allowed;
+    if (!allowed && this.skipping) {
+      this.setSkipping(false);
+    }
+  }
+
   public setSkipping(active: boolean): void {
+    if (active && !this.allowSkipping) {
+      return;
+    }
     if (
       active &&
       !this.currentLineSeen &&
@@ -512,9 +524,57 @@ export class DialogueOverlay {
 
   public waitForClick(): Promise<void> {
     this.clearTimers();
+    this.clearWaitListeners?.();
     this.isTyping = false;
     return new Promise<void>((resolve) => {
-      this.advanceResolver = resolve;
+      let settled = false;
+      const cleanup = (): void => {
+        window.removeEventListener("pointerdown", onHiddenPointer, true);
+        window.removeEventListener("keydown", onHiddenKey, true);
+        if (this.clearWaitListeners === cleanup) {
+          this.clearWaitListeners = null;
+        }
+      };
+      const done = (): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        if (this.advanceResolver === done) {
+          this.advanceResolver = null;
+        }
+        resolve();
+      };
+      const onHiddenPointer = (ev: PointerEvent): void => {
+        if (
+          !this.layerEl.classList.contains("is-hidden") ||
+          this.activeOverlays.size > 0
+        ) {
+          return;
+        }
+        const target = ev.target as HTMLElement | null;
+        if (target?.closest(".ddlc-status-pill")) {
+          return;
+        }
+        done();
+      };
+      const onHiddenKey = (ev: KeyboardEvent): void => {
+        if (
+          !this.layerEl.classList.contains("is-hidden") ||
+          this.activeOverlays.size > 0
+        ) {
+          return;
+        }
+        if (ev.key === " " || ev.key === "Enter") {
+          ev.preventDefault();
+          done();
+        }
+      };
+      this.clearWaitListeners = cleanup;
+      this.advanceResolver = done;
+      window.addEventListener("pointerdown", onHiddenPointer, true);
+      window.addEventListener("keydown", onHiddenKey, true);
     });
   }
 
@@ -596,6 +656,7 @@ export class DialogueOverlay {
 
   public hide(): void {
     this.clearTimers();
+    this.clearWaitListeners?.();
     this.isTyping = false;
     this.advanceResolver = null;
     this.layerEl.classList.add("is-hidden");

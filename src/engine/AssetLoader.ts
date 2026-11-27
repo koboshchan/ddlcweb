@@ -504,6 +504,12 @@ export class AssetLoader {
       fill = "#ffffff";
       strokeWidth = 0;
       align = "center";
+    } else if (nameHint === "sayori_text" || props.style === "sayori_text") {
+      fontFamily = "s1";
+      fontSize = 34;
+      fill = "#000000";
+      strokeWidth = 0;
+      align = "left";
     } else if (nameHint === "splash_warning") {
       fontFamily = "Aller_Rg";
       fontSize = 24;

@@ -287,6 +287,12 @@ export class AudioEngine {
     this.active.set(channel, record);
   }
 
+  public stopAll(fadeout = 0): void {
+    for (const ch of ["music", "music_poem", "sound", "sfx"] as const) {
+      this.stop(ch, fadeout);
+    }
+  }
+
   public stop(channel: AudioChannelName, fadeout = 0, clearQueue = true): void {
     if (clearQueue) {
       this.queued.delete(channel);
